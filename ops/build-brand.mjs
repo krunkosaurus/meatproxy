@@ -12,10 +12,19 @@ for (const [name, width] of [['favicon.png', 32], ['apple-touch-icon.png', 180]]
 }
 
 const template = await readFile(new URL('../brand/social.svg', import.meta.url), 'utf8');
-const card = new Resvg(template.replaceAll('{{mark}}', mark), {
+const renderOptions = {
   font: {
     loadSystemFonts: false,
     fontFiles: ['Regular', 'Bold'].map(weight => fileURLToPath(new URL(`../brand/fonts/AtkinsonHyperlegible-${weight}.ttf`, import.meta.url))),
   },
-});
-await writeFile(new URL('../public/og.png', import.meta.url), card.render().asPng());
+};
+await writeFile(new URL('../public/og.png', import.meta.url), new Resvg(template.replaceAll('{{mark}}', mark), renderOptions).render().asPng());
+const handoff = await readFile(new URL('../brand/handoff.svg', import.meta.url), 'utf8');
+for (const [state, label, first, second, instruction] of [
+  ['online', 'Sender online when previewed', 'Someone has', 'files for you.', 'Open the link. Accept the transfer.'],
+  ['busy', 'Sender busy when previewed', 'Someone has', 'files for you.', 'Open the link to check availability.'],
+  ['offline', 'Sender offline', 'This file link', 'has expired.', 'Ask the sender for a fresh link.'],
+]) {
+  const svg = handoff.replaceAll('{{mark}}', mark).replace('{{label}}', label).replace('{{first}}', first).replace('{{second}}', second).replace('{{instruction}}', instruction).replaceAll('{{statusColor}}', state === 'online' ? '#476541' : '#62675b');
+  await writeFile(new URL(`../public/og-${state}.png`, import.meta.url), new Resvg(svg, renderOptions).render().asPng());
+}

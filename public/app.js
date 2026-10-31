@@ -7,6 +7,7 @@ const received = new Map();
 let room = isSender ? '' : location.pathname.split('/')[2];
 let secret = isSender ? makeSecret() : location.hash.slice(1);
 let key, ws, peer, socketQueue = Promise.resolve(), preparing = false, ended = false;
+let accepted = false, previewTimer;
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const size = bytes => bytes < 1024 ? `${bytes} B` : bytes < 1024 ** 2 ? `${(bytes / 1024).toFixed(1)} KB` : `${(bytes / 1024 ** 2).toFixed(1)} MB`;
 function status(title, detail, state = '') { $('status').textContent = title; $('status-detail').textContent = detail; $('status-dot').className = `status-dot ${state}`; }
@@ -16,6 +17,33 @@ function updateCommand() {
   $('agent-command').textContent = `node meatproxy-receive.mjs '${location.origin}/s/${room}#${secret}' ./handoff`;
   $('copy-command').disabled = false;
 }
+function publishPreview() {
+  // Files can be selected before the room is created; created publishes them too.
+  if (!room || ws?.readyState !== WebSocket.OPEN) return;
+  packet({ type: 'preview', count: files.length, totalBytes: files.reduce((sum, file) => sum + file.size, 0), names: $('preview-names').checked ? files.slice(0, 3).map(file => file.name.slice(0, 512)) : [] });
+}
+async function checkInvite() {
+  let state;
+  try {
+    const response = await fetch(`/s/${room}/status`, { cache: 'no-store' });
+    if (!response.ok) throw new Error('Could not check the sender.');
+    const preview = await response.json();
+    if (accepted) return;
+    state = preview.state;
+    $('accept-files').disabled = state !== 'online';
+    $('invite-summary').textContent = state === 'offline' ? 'This link has expired.' : preview.count ? `${preview.count} ${preview.count === 1 ? 'file' : 'files'} · ${size(preview.totalBytes)}` : 'The sender is choosing files.';
+    $('invite-names').textContent = preview.names.join(' · ') + (preview.names.length && preview.count > preview.names.length ? ` · + ${preview.count - preview.names.length} more` : '');
+    $('invite-names').hidden = preview.names.length === 0;
+    if (state === 'online') status('Sender online', 'Accept when you’re ready to receive.', 'active');
+    else if (state === 'busy') status('Sender busy', 'Someone else is receiving. This page will update when it’s your turn.');
+    else status('Sender offline', 'Ask the sender for a fresh link.');
+  } catch {
+    if (accepted) return;
+    $('accept-files').disabled = true;
+    status('Checking the sender…', 'Could not reach Meatproxy. Trying again shortly.');
+  }
+  if (state !== 'offline') previewTimer = setTimeout(checkInvite, 10_000);
+}
 function progress(done, total) {
   $('progress').hidden = total === 0; $('progress').value = total ? done / total * 100 : 0;
   $('transfer-meta').textContent = total ? `${size(done)} of ${size(total)} · ${peer?.transport === 'direct' ? 'Direct connection' : 'Encrypted relay'}` : '';
@@ -24,7 +52,7 @@ function fail(error) {
   const message = error instanceof Error ? error.message : String(error);
   notice(message); status('The handoff paused', message, 'error');
   if (peer) { peer.failed = true; for (const waiter of peer.waiters.values()) waiter.reject(new Error(message)); peer.waiters.clear(); }
-  $('retry').hidden = isSender;
+  $('retry').hidden = isSender || !accepted;
 }
 function newPeer() {
   if (peer) { clearTimeout(peer.timer); peer.closed = true; peer.pc?.close(); for (const waiter of peer.waiters.values()) waiter.reject(new Error('The recipient disconnected.')); }
@@ -215,8 +243,8 @@ async function addFiles(incoming) {
       const sha256 = await digest(await file.arrayBuffer());
       files.push({ id: crypto.randomUUID(), file, name: file.name, size: file.size, sha256, state: 'Ready to send' });
     }
-    renderFiles();
-    if (!peer?.ready) status('Ready to send', 'They open the link. Files start arriving.', 'active');
+    renderFiles(); publishPreview();
+    if (!peer?.ready) status('Ready to send', 'They open the link and accept your files.', 'active');
   } catch (error) { fail(error); }
   finally { preparing = false; $('add-note').disabled = false; }
   if (peer?.ready) pump(peer).catch(fail);
@@ -255,7 +283,7 @@ async function connect() {
       if (msg.type === 'created') {
         room = msg.room; history.replaceState(null, '', `/s/${room}#${secret}`);
         $('share-link').value = location.href; $('copy-link').disabled = false;
-        updateCommand();
+        updateCommand(); publishPreview();
         status('Ready when you are', '', 'active');
       } else if (msg.type === 'peer-joined') newPeer();
       else if (msg.type === 'joined') {
@@ -309,6 +337,16 @@ for (const tab of inputTabs) {
   };
 }
 $('dropzone').onclick = () => $('file-input').click();
+$('preview-names').onchange = publishPreview;
+$('accept-files').onclick = () => {
+  accepted = true; clearTimeout(previewTimer);
+  $('receive-invite').hidden = true; $('receive-intro').hidden = false; $('receive-actions').hidden = false;
+  $('content-title').textContent = 'Your files';
+  $('lead').textContent = 'Receive here. Save when ready.';
+  $('keep-open-text').textContent = 'Keep this tab open until received.';
+  status('Connecting…', 'Starting your encrypted transfer.');
+  connect().catch(fail);
+};
 $('file-input').onchange = event => { addFiles([...event.target.files]); event.target.value = ''; };
 for (const name of ['dragenter', 'dragover']) $('dropzone').addEventListener(name, event => { event.preventDefault(); $('dropzone').classList.add('dragging'); });
 for (const name of ['dragleave', 'drop']) $('dropzone').addEventListener(name, event => { event.preventDefault(); $('dropzone').classList.remove('dragging'); });
@@ -341,18 +379,22 @@ window.addEventListener('beforeunload', event => {
 });
 if (!isSender) {
   document.body.classList.add('receiving');
-  $('sender-controls').hidden = true; $('receive-intro').hidden = false; $('receive-actions').hidden = false;
+  $('sender-controls').hidden = true; $('receive-invite').hidden = false;
   $('headline').textContent = 'Files, coming your way.';
-  $('lead').textContent = 'Receive here. Save when ready.';
-  $('content-title').textContent = 'Your files'; $('share-title').textContent = 'Transfer status';
+  $('lead').textContent = 'Accept to receive them from the sender.';
+  $('content-title').textContent = 'Peer-to-peer handoff'; $('share-title').textContent = 'Live connection';
   $('content-step').hidden = true; $('share-step').hidden = true; $('share-controls').hidden = true;
   $('queued-files').open = true; $('file-count').hidden = true;
-  $('keep-open-text').textContent = 'Keep this tab open until received.';
+  $('keep-open-text').textContent = 'Files only transfer after you accept.';
   $('agent-title').textContent = 'Receive with an agent';
   $('agent-tip').textContent = 'Close this receiving tab before running the command. Keep the sender’s tab open. Files are saved, never run.';
   updateCommand();
 }
-try { key = await importSecret(secret); await connect(); } catch (error) { fail(error); }
+try {
+  key = await importSecret(secret);
+  if (isSender) await connect();
+  else { status('Checking the sender…', ''); await checkInvite(); }
+} catch (error) { fail(error); }
 
 // A stored ZIP keeps arbitrary file bytes intact and avoids third-party scripts.
 const crcTable = Array.from({ length: 256 }, (_, i) => { let c = i; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ c >>> 1 : c >>> 1; return c >>> 0; });

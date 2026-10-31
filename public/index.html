@@ -62,7 +62,13 @@
           </div>
           <p class="limit">Any file type · Up to 512 MB</p>
         </div>
-        <div id="receive-intro" class="receive-intro" hidden><span class="receive-mark" aria-hidden="true">↓</span><p>Files arrive here automatically.</p></div>
+        <div id="receive-invite" class="receive-invite" hidden>
+          <p id="invite-summary">Checking this live link…</p>
+          <p id="invite-names" hidden></p>
+          <button id="accept-files" class="primary" disabled>Accept files ↓</button>
+          <p class="invite-help">Receive from the sender’s browser. Both of you need to stay online.</p>
+        </div>
+        <div id="receive-intro" class="receive-intro" hidden><span class="receive-mark" aria-hidden="true">↓</span><p>Your files will appear here.</p></div>
         <details id="queued-files" class="queued-files" hidden>
           <summary id="file-count" aria-live="polite">0 files added</summary>
           <div class="file-list" id="file-list" aria-label="Files"></div>
@@ -79,6 +85,8 @@
             <label for="share-link" class="sr-only">Private sharing link</label>
             <input id="share-link" readonly value="Creating your link…" spellcheck="false">
             <button class="primary" id="copy-link" disabled>Copy link ↗</button>
+            <label class="preview-option"><input id="preview-names" type="checkbox" aria-describedby="preview-help">Show filenames in preview</label>
+            <p id="preview-help" class="preview-help">Names become visible to chat apps and may be cached.</p>
           </div>
           <p class="keep-open" id="keep-open-text">Keep this tab open until sent.</p>
           <div class="status-block" role="status"><span class="status-dot" id="status-dot" aria-hidden="true"></span><div><strong id="status">Creating your link…</strong><p id="status-detail"></p></div></div>
@@ -98,7 +106,7 @@
     <p class="notice" id="notice" role="alert" hidden></p>
   </main>
   <footer>
-    <details><summary>How it works</summary><p>Open a link to receive files automatically. Keep both tabs open until the transfer finishes, then save your files.</p><p>Files and notes are encrypted. They travel directly when possible, or through an encrypted relay. Files are never stored on our server.</p><p>Anyone with the complete link can receive. One recipient at a time, up to 100 files and 512 MB. Links expire when the sender leaves or after 12 hours.</p></details>
+    <details><summary>How it works</summary><p>Open a link and choose Accept files to start the peer-to-peer transfer. Keep both tabs open until it finishes, then save your files.</p><p>Files and notes are encrypted. They travel directly when possible, or through an encrypted relay. Files are never stored on our server.</p><p>Link previews show availability, file count and total size. Filenames stay private unless the sender enables them in previews. Chat apps may cache previews; open the link to check the sender’s status.</p><p>Anyone with the complete link can receive. One recipient at a time, up to 100 files and 512 MB. Links expire when the sender leaves or after 12 hours.</p></details>
     <a href="https://github.com/krunkosaurus/meatproxy" target="_blank" rel="noopener noreferrer">GitHub ↗</a>
   </footer>
   <noscript>Meatproxy needs JavaScript to encrypt and send files between browsers.</noscript>

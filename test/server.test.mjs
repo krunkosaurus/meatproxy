@@ -20,20 +20,31 @@ async function setup(t) {
 }
 const message = async ws => JSON.parse((await once(ws, 'message'))[0].toString());
 async function create(connect) { const owner = await connect(); const response = message(owner); owner.send(JSON.stringify({ type: 'create' })); return { owner, room: (await response).room }; }
+async function publish(owner, preview) {
+  const processed = once(owner, 'pong');
+  owner.send(JSON.stringify({ type: 'preview', ...preview })); owner.ping(); await processed;
+}
 
 test('social crawlers get a valid public preview without exposing or joining a handoff', async t => {
   const { app, connect } = await setup(t);
   const { room } = await create(connect);
   const base = `http://127.0.0.1:${app.server.address().port}`;
+  const secret = makeSecret();
   const home = await fetch(base).then(response => response.text());
-  const response = await fetch(`${base}/s/${room}`, { headers: { 'User-Agent': 'Twitterbot/1.0' } });
+  assert.match(home, /Meatproxy — Send files &amp; notes/);
+  const response = await fetch(`${base}/s/${room}#${secret}`, { headers: { 'User-Agent': 'Twitterbot/1.0' } });
   assert.equal(response.status, 200);
   assert.equal(response.headers.get('x-robots-tag'), 'noindex, nofollow');
   const html = await response.text();
-  assert.equal(html, home);
-  assert.ok(!html.includes(room));
+  assert.equal(response.headers.get('cache-control'), 'no-store');
+  assert.match(html, /Someone wants to send you files/);
+  assert.match(html, /Sender online when previewed/);
+  assert.match(html, /Open to accept a peer-to-peer transfer/);
+  assert.ok(html.includes(`property="og:url" content="https://meatproxy.to/s/${room}"`));
+  assert.ok(!html.includes(secret));
   const image = html.match(/property="og:image" content="([^"]+)"/)[1];
   assert.equal(new URL(image).origin, 'https://meatproxy.to');
+  assert.equal(new URL(image).pathname, '/og-online.png');
   const card = await fetch(base + new URL(image).pathname);
   assert.equal(card.status, 200);
   assert.equal(card.headers.get('content-type'), 'image/png');
@@ -46,6 +57,67 @@ test('social crawlers get a valid public preview without exposing or joining a h
   assert.equal((await head.arrayBuffer()).byteLength, 0);
   assert.equal(app.rooms.size, 1);
   assert.equal(app.rooms.get(room).guest, null);
+});
+
+test('filename previews are opt-in, escaped, removable, and never join the room', async t => {
+  const { app, connect } = await setup(t); const { owner, room } = await create(connect);
+  const base = `http://127.0.0.1:${app.server.address().port}/s/${room}`;
+  const preview = { count: 1, totalBytes: 283 * 1024 ** 2, names: [] };
+  await publish(owner, preview);
+  assert.deepEqual(await fetch(`${base}/status`).then(r => r.json()), { state: 'online', ...preview });
+  const generic = await fetch(base).then(r => r.text());
+  assert.match(generic, /Someone wants to send you a file/);
+  assert.match(generic, /1 file · 283 MB/);
+  const name = 'video & notes "><img src=x onerror="alert(1)">.mp4';
+  await publish(owner, { ...preview, names: [name] });
+  const html = await fetch(base).then(r => r.text());
+  assert.ok(!html.includes(name));
+  assert.match(html, /video &amp; notes &quot;&gt;&lt;img src=x onerror=&quot;alert\(1\)&quot;&gt;\.mp4/);
+  assert.equal((html.match(/<script /g) || []).length, 1);
+  assert.deepEqual((await fetch(`${base}/status`).then(r => r.json())).names, [name]);
+  await publish(owner, preview);
+  assert.deepEqual((await fetch(`${base}/status`).then(r => r.json())).names, []);
+  assert.ok(!(await fetch(base).then(r => r.text())).includes('video &amp; notes'));
+  const head = await fetch(`${base}/status`, { method: 'HEAD' });
+  assert.equal(head.headers.get('x-robots-tag'), 'noindex, nofollow');
+  assert.equal(await head.text(), '');
+  assert.equal(app.rooms.get(room).guest, null);
+});
+
+test('preview availability follows live room occupancy and removes names after expiry', async t => {
+  const { app, connect } = await setup(t); const { owner, room } = await create(connect);
+  const base = `http://127.0.0.1:${app.server.address().port}/s/${room}`;
+  await publish(owner, { count: 1, totalBytes: 100, names: ['example.mp4'] });
+  const receiver = await connect(); const joined = message(receiver); const ownerJoined = message(owner);
+  receiver.send(JSON.stringify({ type: 'join', room })); await joined; await ownerJoined;
+  assert.equal((await fetch(`${base}/status`).then(r => r.json())).state, 'busy');
+  assert.match(await fetch(base).then(r => r.text()), /og-busy\.png/);
+  const left = message(owner); receiver.close(); assert.equal((await left).type, 'peer-left');
+  assert.equal((await fetch(`${base}/status`).then(r => r.json())).state, 'online');
+  const closed = once(owner, 'close'); owner.close(); await closed;
+  assert.deepEqual(await fetch(`${base}/status`).then(r => r.json()), { state: 'offline', count: 0, totalBytes: 0, names: [] });
+  const expired = await fetch(base).then(r => r.text());
+  assert.match(expired, /This file link has expired/);
+  assert.match(expired, /og-offline\.png/);
+  assert.ok(!expired.includes('example.mp4'));
+  const aged = await create(connect);
+  app.rooms.get(aged.room).created -= 12 * 60 * 60 * 1000;
+  assert.equal((await fetch(base.replace(room, aged.room) + '/status').then(r => r.json())).state, 'offline');
+  const later = await connect(); const unavailable = message(later); later.send(JSON.stringify({ type: 'join', room: aged.room })); assert.equal((await unavailable).type, 'unavailable');
+});
+
+test('only owners can publish bounded preview metadata', async t => {
+  const { app, connect } = await setup(t); const { owner, room } = await create(connect);
+  const preview = { type: 'preview', count: 1, totalBytes: 10, names: ['example.txt'] };
+  const receiver = await connect(); const joined = message(receiver); receiver.send(JSON.stringify({ type: 'join', room })); await joined;
+  const closed = once(receiver, 'close'); receiver.send(JSON.stringify(preview)); assert.equal((await closed)[0], 1008);
+  assert.equal(app.rooms.get(room).preview.count, 0);
+  for (const invalid of [{ count: 101 }, { totalBytes: 512 * 1024 ** 2 + 1 }, { names: ['x'.repeat(513)] }, { names: [123] }, { names: ['a', 'b'] }]) {
+    const sender = (await create(connect)).owner; const rejected = once(sender, 'close');
+    sender.send(JSON.stringify({ ...preview, ...invalid })); assert.equal((await rejected)[0], 1008);
+  }
+  await publish(owner, { count: 1, totalBytes: 10, names: [] });
+  assert.equal(app.rooms.get(room).preview.count, 1);
 });
 
 test('service starts when launched through the deployed release symlink', { timeout: 5000 }, async t => {
