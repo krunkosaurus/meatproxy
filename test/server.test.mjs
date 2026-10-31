@@ -21,6 +21,33 @@ async function setup(t) {
 const message = async ws => JSON.parse((await once(ws, 'message'))[0].toString());
 async function create(connect) { const owner = await connect(); const response = message(owner); owner.send(JSON.stringify({ type: 'create' })); return { owner, room: (await response).room }; }
 
+test('social crawlers get a valid public preview without exposing or joining a handoff', async t => {
+  const { app, connect } = await setup(t);
+  const { room } = await create(connect);
+  const base = `http://127.0.0.1:${app.server.address().port}`;
+  const home = await fetch(base).then(response => response.text());
+  const response = await fetch(`${base}/s/${room}`, { headers: { 'User-Agent': 'Twitterbot/1.0' } });
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get('x-robots-tag'), 'noindex, nofollow');
+  const html = await response.text();
+  assert.equal(html, home);
+  assert.ok(!html.includes(room));
+  const image = html.match(/property="og:image" content="([^"]+)"/)[1];
+  assert.equal(new URL(image).origin, 'https://meatproxy.to');
+  const card = await fetch(base + new URL(image).pathname);
+  assert.equal(card.status, 200);
+  assert.equal(card.headers.get('content-type'), 'image/png');
+  const png = Buffer.from(await card.arrayBuffer());
+  assert.equal(png.subarray(0, 8).toString('hex'), '89504e470d0a1a0a');
+  assert.equal(png.readUInt32BE(16), 1200);
+  assert.equal(png.readUInt32BE(20), 630);
+  const head = await fetch(base + new URL(image).pathname, { method: 'HEAD' });
+  assert.equal(head.status, 200);
+  assert.equal((await head.arrayBuffer()).byteLength, 0);
+  assert.equal(app.rooms.size, 1);
+  assert.equal(app.rooms.get(room).guest, null);
+});
+
 test('service starts when launched through the deployed release symlink', { timeout: 5000 }, async t => {
   const directory = await mkdtemp(join(tmpdir(), 'meatproxy-entry-'));
   t.after(() => rm(directory, { recursive: true, force: true }));

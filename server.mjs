@@ -7,11 +7,15 @@ import { WebSocketServer, WebSocket } from 'ws';
 
 const publicDir = new URL('./public/', import.meta.url);
 const assets = new Map([
-  ['/app.js', ['app.js', 'text/javascript']],
-  ['/protocol.js', ['protocol.js', 'text/javascript']],
-  ['/style.css', ['style.css', 'text/css']],
-  ['/favicon.svg', ['favicon.svg', 'image/svg+xml']],
-  ['/receive.mjs', ['receive.mjs', 'text/javascript']],
+  ['/app.js', ['app.js', 'text/javascript; charset=utf-8']],
+  ['/protocol.js', ['protocol.js', 'text/javascript; charset=utf-8']],
+  ['/style.css', ['style.css', 'text/css; charset=utf-8']],
+  ['/logo.svg', ['logo.svg', 'image/svg+xml; charset=utf-8']],
+  ['/favicon.svg', ['favicon.svg', 'image/svg+xml; charset=utf-8']],
+  ['/favicon.png', ['favicon.png', 'image/png']],
+  ['/apple-touch-icon.png', ['apple-touch-icon.png', 'image/png']],
+  ['/og.png', ['og.png', 'image/png']],
+  ['/receive.mjs', ['receive.mjs', 'text/javascript; charset=utf-8']],
 ]);
 const tokenPattern = /^[A-Za-z0-9_-]{22}$/;
 
@@ -26,12 +30,13 @@ export function createApp({ origin = process.env.PUBLIC_ORIGIN, maxClients = 200
     res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
     if (!['GET', 'HEAD'].includes(req.method)) { res.writeHead(405).end(); return; }
     if (path === '/healthz') { res.setHeader('Content-Type', 'application/json'); res.end('{"ok":true,"version":"0.1.0"}'); return; }
-    if (path === '/robots.txt') { res.setHeader('Content-Type', 'text/plain'); res.end('User-agent: *\nDisallow: /s/\n'); return; }
-    const asset = assets.get(path) || (path === '/' || /^\/s\/[A-Za-z0-9_-]{22}$/.test(path) ? ['index.html', 'text/html'] : null);
+    // Preview crawlers can read the generic page; handoff pages still send noindex.
+    if (path === '/robots.txt') { res.setHeader('Content-Type', 'text/plain'); res.end('User-agent: *\nAllow: /\n'); return; }
+    const asset = assets.get(path) || (path === '/' || /^\/s\/[A-Za-z0-9_-]{22}$/.test(path) ? ['index.html', 'text/html; charset=utf-8'] : null);
     if (!asset) { res.writeHead(404).end('Not found'); return; }
     try {
       const body = await readFile(new URL(asset[0], publicDir));
-      res.setHeader('Content-Type', `${asset[1]}; charset=utf-8`);
+      res.setHeader('Content-Type', asset[1]);
       if (path.startsWith('/s/')) res.setHeader('X-Robots-Tag', 'noindex, nofollow');
       res.end(req.method === 'HEAD' ? undefined : body);
     } catch { res.writeHead(500).end('Unable to load the application'); }

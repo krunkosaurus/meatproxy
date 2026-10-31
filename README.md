@@ -33,7 +33,7 @@ npm run build
 npm start
 ```
 
-Open http://localhost:3477. The first page creates a room; its address becomes the recipient URL. `npm run build` bundles the shared crypto protocol and the Node receiver source into `public/receive.mjs`. Regenerate it after changes to either source.
+Open http://localhost:3477. The first page creates a room; its address becomes the recipient URL. `npm run build` bundles the shared crypto protocol and the Node receiver source into `public/receive.mjs`, and regenerates the brand images. Regenerate it after changes to these sources.
 
 ```sh
 npm run check
@@ -41,6 +41,12 @@ npm test
 ```
 
 For a real browser fallback test, keep the normal server running and run `node test/blocked-direct-proxy.mjs`. Open http://localhost:3478 in two browser tabs. The fixture suppresses initial WebRTC signaling so the production browser code must fall back to the encrypted relay after eight seconds. This test fixture is not deployed.
+
+## Branding and link previews
+
+The two folded pieces in `public/logo.svg` form the Meatproxy M. `npm run build:brand` generates the matching SVG/PNG favicons, Apple touch icon, and 1200 × 630 social image from this mark and `brand/social.svg`. The renderer is a development dependency; the server only serves the finished assets. The bundled Atkinson Hyperlegible fonts are licensed under the [SIL Open Font License](brand/fonts/OFL.txt), sourced from [Google Fonts](https://github.com/google/fonts/tree/main/ofl/atkinsonhyperlegible).
+
+The page includes [Open Graph](https://ogp.me/) metadata and a large-image Twitter/X card. All previews use the public homepage URL and generic branding, including links to a handoff. A preview never includes filenames, notes, room IDs, or encryption keys, and fetching it does not join the transfer. `robots.txt` permits preview fetching; handoff pages retain their `noindex, nofollow` header. Allowing the page to be fetched also lets search crawlers [read that indexing instruction](https://developers.google.com/search/docs/crawling-indexing/block-indexing).
 
 ## Transfer design
 
