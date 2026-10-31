@@ -88,8 +88,11 @@
             <label for="share-link" class="sr-only">Private sharing link</label>
             <input id="share-link" readonly value="Creating your link…" spellcheck="false">
             <button class="primary" id="copy-link" disabled>Copy link ↗</button>
-            <label class="preview-option"><input id="preview-names" type="checkbox" aria-describedby="preview-help">Show filenames in preview</label>
-            <p id="preview-help" class="preview-help">Names become visible to chat apps and may be cached.</p>
+            <details class="share-options">
+              <summary>Link preview options</summary>
+              <label class="preview-option"><input id="preview-names" type="checkbox" aria-describedby="preview-help">Show filenames in preview</label>
+              <p id="preview-help" class="preview-help">Names become visible to chat apps and may be cached.</p>
+            </details>
           </div>
           <p class="keep-open" id="keep-open-text">Keep this tab open until sent.</p>
           <div class="status-block" role="status"><span class="status-dot" id="status-dot" aria-hidden="true"></span><div><strong id="status">Creating your link…</strong><p id="status-detail"></p></div></div>
@@ -113,6 +116,12 @@
     <details><summary>How it works</summary><p>Open a link and choose Accept files to start the peer-to-peer transfer. Keep both tabs open until it finishes, then save your files.</p><p>Files and notes are encrypted. They travel directly when possible, or through an encrypted relay. Files are never stored on our server.</p><p>Direct connections can reveal your IP address to the other person. Encryption protects file contents, not network addresses. An automatic relay fallback does not undo addresses already shared while trying to connect.</p><p>Link previews show availability, file count and total size. Filenames stay private unless the sender enables them in previews. Chat apps may cache previews; open the link to check the sender’s status.</p><p>Anyone with the complete link can receive. One recipient at a time, up to 100 files and 512 MB. Links expire when the sender leaves or after 12 hours.</p></details>
     <a href="https://github.com/krunkosaurus/meatproxy" target="_blank" rel="noopener noreferrer">GitHub ↗</a>
   </footer>
+  <aside class="mobile-actions" id="mobile-actions" aria-label="Handoff action" hidden>
+    <div class="mobile-action-heading"><strong id="mobile-summary"></strong><span id="mobile-amount"></span></div>
+    <progress id="mobile-progress" max="100" value="0" aria-label="Transfer progress" hidden></progress>
+    <button id="mobile-action" class="primary" disabled>Copy link ↗</button>
+    <p id="mobile-hint">Keep this tab open until sent.</p>
+  </aside>
   <noscript>Meatproxy needs JavaScript to encrypt and send files between browsers.</noscript>
 </body>
 </html>

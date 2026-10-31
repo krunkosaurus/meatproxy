@@ -77,6 +77,10 @@ textarea::placeholder { color: var(--muted); opacity: 1; }
 .preview-option { display: flex; align-items: center; gap: 10px; min-height: 48px; margin-top: 8px; cursor: pointer; }
 .preview-option input { width: 20px; height: 20px; margin: 0; flex-shrink: 0; accent-color: var(--green); }
 .preview-help { margin: 0; color: var(--muted); font-size: 14px; }
+.share-options { margin-top: 6px; }
+.share-options summary { color: var(--muted); font-size: 14px; }
+.share-options .preview-option { margin-top: 0; }
+.mobile-actions { display: none; }
 .receive-invite p { margin: 0 0 16px; }
 #invite-summary { font-weight: 600; }
 #invite-names { overflow-wrap: anywhere; color: var(--muted); }
@@ -142,4 +146,14 @@ noscript { display: block; padding: 20px; }
   .card { padding: 16px; }
   .brand { font-size: 22px; }
   .privacy-label { gap: 3px; }
+}
+@media (max-width: 759px) {
+  body:has(.mobile-actions:not([hidden])) { padding-bottom: calc(178px + env(safe-area-inset-bottom)); }
+  .mobile-actions { display: block; position: fixed; z-index: 10; bottom: 0; left: 0; right: 0; padding: 12px 16px calc(12px + env(safe-area-inset-bottom)); border-top: 1px solid var(--line); background: var(--white); box-shadow: 0 -6px 24px #292a2510; }
+  .mobile-action-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 8px; font-size: 14px; }
+  #mobile-summary { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #mobile-amount { color: var(--muted); flex-shrink: 0; font-variant-numeric: tabular-nums; }
+  #mobile-progress { margin: 0 0 10px; }
+  #mobile-hint { margin: 6px 0 0; text-align: center; color: var(--muted); font-size: 13px; }
+  body:has(#note:focus) .mobile-actions { display: none; }
 }
