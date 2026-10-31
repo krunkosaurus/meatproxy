@@ -59,6 +59,9 @@ const built = fingerprint(new Map(await Promise.all([...assets, ['/index.html', 
 const versioned = path => `${path}?v=${built.get(path).version}`;
 const tokenPattern = /^[A-Za-z0-9_-]{22}$/;
 const roomLifetime = 12 * 60 * 60 * 1000;
+// Above either limit, the relay stops reading from a sender until its receiver catches up.
+// Each queued message costs heap however small it is, so messages are counted as well as bytes.
+const relayBufferBytes = 512 * 1024, relayBufferMessages = 256;
 const escapeHTML = value => value.replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
 
 function previewOf(room) {
@@ -133,16 +136,23 @@ export function createApp({ origin = process.env.PUBLIC_ORIGIN, maxClients = 200
     wss.handleUpgrade(req, socket, head, ws => wss.emit('connection', ws));
   });
   wss.on('connection', ws => {
-    ws.alive = true;
+    ws.alive = true; ws.held = false; ws.relayQueue = 0;
     ws.on('pong', () => { ws.alive = true; });
     const setupTimer = setTimeout(() => { if (!ws.room) ws.close(1008, 'Join a handoff first'); }, 10_000);
     ws.on('error', () => {}); // Errors are followed by close; close performs room cleanup.
     ws.on('message', (data, binary) => {
+      ws.alive = true; // A slow upload can hold the pong behind megabytes of file data.
       if (binary) {
         const peer = ws.owner ? ws.room?.guest : ws.room?.owner;
-        if (!peer || peer.readyState !== WebSocket.OPEN) return;
-        if (peer.bufferedAmount > 1024 * 1024) { ws.close(1008, 'Receiver is too slow; reconnect'); return; }
-        peer.send(data, { binary: true });
+        // After a receiver leaves, the sender's queued data for it can still be arriving.
+        // The sender's first message for the next receiver is a signal, which follows all of it.
+        if (!peer || peer.readyState !== WebSocket.OPEN || (ws.owner && ws.room.previousSession)) return;
+        // Pausing lets TCP slow the sender's browser. Write callbacks also fire, with an
+        // error, when the receiver's socket is destroyed, so a departed receiver releases it.
+        const backlogged = () => peer.bufferedAmount > relayBufferBytes || peer.relayQueue > relayBufferMessages;
+        peer.relayQueue++;
+        peer.send(data, { binary: true }, () => { peer.relayQueue--; if (ws.isPaused && !backlogged()) ws.resume(); });
+        if (backlogged()) { ws.pause(); ws.held = true; }
         return;
       }
       let msg;
@@ -167,6 +177,8 @@ export function createApp({ origin = process.env.PUBLIC_ORIGIN, maxClients = 200
         ws.room.preview = { count: msg.count, totalBytes: msg.totalBytes, names: msg.names.map(name => name.replace(/[\x00-\x1f\x7f]/g, '').slice(0, 180)) };
       } else if (msg.type === 'signal' && ws.room && typeof msg.payload === 'string' && msg.payload.length <= 60_000) {
         const peer = ws.owner ? ws.room.guest : ws.room.owner;
+        // Relies on the sender sending no signals after its first relay data in a session (app.js setupRTC).
+        if (ws.owner) ws.room.previousSession = false;
         send(peer, { type: 'signal', payload: msg.payload });
       } else if (msg.type === 'reject' && ws.owner && ws.room?.guest) {
         ws.room.guest.close(1008, 'Invalid link key');
@@ -181,13 +193,18 @@ export function createApp({ origin = process.env.PUBLIC_ORIGIN, maxClients = 200
         send(room.guest, { type: 'sender-left' });
         room.guest?.close(1000, 'Sender left');
       } else if (room.guest === ws) {
-        room.guest = null; send(room.owner, { type: 'peer-left' });
+        room.guest = null; room.previousSession = true; send(room.owner, { type: 'peer-left' });
       }
     });
   });
   const heartbeat = setInterval(() => {
     for (const ws of wss.clients) {
-      if (!ws.alive) { ws.terminate(); continue; }
+      // A sender held at any time since the last check may not have read its pong yet, so its
+      // receiver's liveness decides. Two sockets holding each other are both checked.
+      const peer = ws.owner ? ws.room?.guest : ws.room?.owner;
+      const exempt = ws.held && !peer?.isPaused;
+      ws.held = ws.isPaused;
+      if (!ws.alive && !exempt) { ws.terminate(); continue; }
       ws.alive = false; ws.ping();
       if (ws.room && Date.now() - ws.room.created >= roomLifetime) ws.close(1000, 'Handoff expired after 12 hours');
     }

@@ -1,5 +1,5 @@
 import { MAX_BYTES, MAX_FILES, CHUNK_BYTES, makeSecret, importSecret, encrypt, decrypt, encodeJSON, decodeJSON, toBase64, fromBase64, validateManifest } from './protocol.js';
-import { streamFile, TransferMeter, waitForDataChannel } from './transfer.js';
+import { streamFile, TransferMeter, waitForDataChannel, createWaiters } from './transfer.js';
 import { FileTasks } from './file-tasks.js';
 import { prepareAdditions } from './handoff.js';
 
@@ -75,7 +75,7 @@ setInterval(() => { if (peer?.progressActive && !peer.closed && !peer.failed) pr
 function fail(error) {
   const message = error instanceof Error ? error.message : String(error);
   notice(message); status('The handoff paused', message, 'error');
-  if (peer) { peer.failed = true; for (const waiter of peer.waiters.values()) waiter.reject(new Error(message)); peer.waiters.clear(); }
+  if (peer) { peer.failed = true; peer.waiters.rejectAll(new Error(message)); }
   abortIncoming(peer);
   $('retry').hidden = isSender || !accepted;
   updateMobileAction();
@@ -126,8 +126,8 @@ function abortIncoming(p) {
 }
 function newPeer() {
   abortIncoming(peer);
-  if (peer) { clearTimeout(peer.timer); peer.closed = true; peer.pc?.close(); for (const waiter of peer.waiters.values()) waiter.reject(new Error('The recipient disconnected.')); }
-  peer = { session: '', pc: null, dc: null, transport: '', tx: Promise.resolve(), rx: Promise.resolve(), outSeq: 0, inSeq: 0, candidates: [], ready: false, sent: new Set(), announced: new Set(), waiters: new Map(), closed: false, failed: false, sending: false, total: 0, done: 0 };
+  if (peer) { clearTimeout(peer.timer); peer.closed = true; peer.pc?.close(); peer.waiters.rejectAll(new Error('The recipient disconnected.')); }
+  peer = { session: '', pc: null, dc: null, transport: '', tx: Promise.resolve(), rx: Promise.resolve(), outSeq: 0, inSeq: 0, candidates: [], ready: false, sent: new Set(), announced: new Set(), waiters: createWaiters(), closed: false, failed: false, sending: false, total: 0, done: 0 };
   return peer;
 }
 async function signal(value, p = peer) {
@@ -148,6 +148,8 @@ function attachChannel(p, channel) {
 }
 function setupRTC(p) {
   p.pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.cloudflare.com:3478' }] });
+  // No signals once relay data may flow: the relay treats the sender's next signal after a
+  // receiver leaves as the end of that receiver's data.
   p.pc.onicecandidate = event => { if (event.candidate && p === peer && !p.closed && p.transport !== 'relay') signal({ type: 'ice', candidate: event.candidate.toJSON() }, p).catch(fail); };
   p.pc.ondatachannel = event => attachChannel(p, event.channel);
   p.pc.onconnectionstatechange = () => { if (p.pc.connectionState === 'failed' && !p.transport && p === peer) requestRelay(p).catch(fail); };
@@ -250,15 +252,6 @@ async function flushIncoming(item) {
   item.parts = []; item.buffered = 0;
   await fileTasks.run('append', { token: item.token, bytes }, { transfer: [bytes.buffer] });
 }
-function waitFor(p, id) {
-  let timer;
-  const promise = new Promise((resolve, reject) => {
-    timer = setTimeout(() => { p.waiters.delete(id); reject(new Error('The other browser stopped responding. Reconnect and try again.')); }, 30_000);
-    p.waiters.set(id, { resolve: value => { clearTimeout(timer); resolve(value); }, reject: error => { clearTimeout(timer); reject(error); } });
-  });
-  promise.catch(() => {}); return promise;
-}
-function resolveWait(p, id, value) { const waiter = p.waiters.get(id); if (waiter) { p.waiters.delete(id); waiter.resolve(value); } }
 async function onControl(p, message) {
   if (message.type === 'ready' && isSender) { p.ready = true; resumeSending(p); }
   else if (message.type === 'manifest' && !isSender) {
@@ -291,8 +284,8 @@ async function onControl(p, message) {
     item.meta.state = result.saved ? 'Saved to folder · verified' : 'Received · verified'; p.incoming = null; renderFiles();
     $('download-all').disabled = saving; $('copy-agent').disabled = ![...received.values()].some(file => /\.(md|txt)$/i.test(file.name) && file.size <= 1024 * 1024);
     await sendControl(p, { type: 'received', id: item.meta.id });
-  } else if (message.type === 'ack' && isSender) resolveWait(p, `ack:${message.id}:${message.offset}`);
-  else if (message.type === 'received' && isSender) resolveWait(p, `done:${message.id}`);
+  } else if (message.type === 'ack' && isSender) p.waiters.resolve(`ack:${message.id}:${message.offset}`);
+  else if (message.type === 'received' && isSender) p.waiters.resolve(`done:${message.id}`);
   else if (message.type === 'complete' && !isSender) {
     if (p.incoming || files.some(file => !received.has(file.id))) throw new Error('The handoff ended before all files arrived.');
     status(files.length ? 'All files received' : 'Waiting for files', files.length ? 'Every file verified.' : 'The sender can add files or a note.', 'active');
@@ -322,12 +315,11 @@ async function pump(p) {
       await sendControl(p, { type: 'start', id: file.id });
       const base = p.done;
       await streamFile(file.file, {
-        transport: p.transport,
         send: bytes => sendPayload(p, 1, bytes),
-        waitForAck: offset => waitFor(p, `ack:${file.id}:${offset}`),
+        waitForAck: offset => p.waiters.wait(`ack:${file.id}:${offset}`),
         onConfirmed: offset => { p.done = base + offset; },
       });
-      const done = waitFor(p, `done:${file.id}`);
+      const done = p.waiters.wait(`done:${file.id}`);
       await sendControl(p, { type: 'end', id: file.id });
       await done; p.done = base + file.size; p.sent.add(file.id); file.state = 'Delivered · verified'; renderFiles();
     }
@@ -483,7 +475,7 @@ async function connect() {
       else if (msg.type === 'unavailable') { ended = true; fail(new Error('The sender is offline or this link has expired. Ask them to keep their tab open and send a fresh link.')); }
       else if (msg.type === 'busy') { ended = true; fail(new Error('Someone else is receiving this handoff. Try again after they close their tab.')); }
       else if (msg.type === 'peer-left') {
-        if (peer) { peer.closed = true; peer.pc?.close(); clearTimeout(peer.timer); for (const waiter of peer.waiters.values()) waiter.reject(new Error('The recipient disconnected.')); }
+        if (peer) { peer.closed = true; peer.pc?.close(); clearTimeout(peer.timer); peer.waiters.rejectAll(new Error('The recipient disconnected.')); }
         status('The recipient has left.', 'Your link is still live. Someone else can open it now.');
         renderFiles();
       } else if (msg.type === 'sender-left') {

@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { connect as connectTCP } from 'node:net';
+import { setTimeout as delay } from 'node:timers/promises';
 import WebSocket from 'ws';
 import { createApp, fingerprint, securityHeaders } from '../server.mjs';
 import { makeSecret, importSecret, encrypt, decrypt, validateManifest } from '../public/protocol.js';
@@ -25,6 +26,21 @@ async function publish(owner, preview) {
   const processed = once(owner, 'pong');
   owner.send(JSON.stringify({ type: 'preview', ...preview })); owner.ping(); await processed;
 }
+async function until(predicate, label) {
+  for (let attempt = 0; attempt < 1000; attempt++) { if (predicate()) return; await delay(10); }
+  assert.fail(`Timed out waiting for ${label}`);
+}
+async function relayPair(t) {
+  const { app, connect } = await setup(t); const { owner, room } = await create(connect);
+  const receiver = await connect(); const joined = message(receiver); const ownerJoined = message(owner);
+  receiver.send(JSON.stringify({ type: 'join', room }));
+  assert.equal((await joined).type, 'joined'); assert.equal((await ownerJoined).type, 'peer-joined');
+  const relayed = [...app.wss.clients];
+  return { connect, owner, room, receiver, relayedSender: relayed.find(ws => ws.owner), relayedReceiver: relayed.find(ws => ws.owner === false) };
+}
+// 30 MiB in messages under the 64 KiB limit: far more than the sockets between the peers can hold.
+const flood = owner => { for (let i = 0; i < 512; i++) owner.send(Buffer.alloc(60 * 1024, i % 251)); };
+const nextMessageOrClose = ws => Promise.race([message(ws), once(ws, 'close').then(([code]) => ({ type: `closed ${code}` }))]);
 
 test('browser worker and imported handoff modules are served as JavaScript', async t => {
   const { app } = await setup(t);
@@ -279,6 +295,128 @@ test('closing sender expires the room and notifies the receiver', async t => {
   const receiver = await connect(); const joined = message(receiver); receiver.send(JSON.stringify({ type: 'join', room })); await joined;
   const left = message(receiver); owner.close(); assert.equal((await left).type, 'sender-left'); assert.equal(app.rooms.has(room), false);
   const later = await connect(); const unavailable = message(later); later.send(JSON.stringify({ type: 'join', room })); assert.equal((await unavailable).type, 'unavailable');
+});
+
+test('a slow receiver pauses the relay sender instead of disconnecting it; every byte then arrives in order', { timeout: 20000 }, async t => {
+  const { owner, receiver, relayedSender, relayedReceiver } = await relayPair(t);
+  let peak = 0; const send = relayedReceiver.send;
+  relayedReceiver.send = function (...args) { const result = send.apply(this, args); peak = Math.max(peak, this.bufferedAmount); return result; };
+  const chunks = []; receiver.on('message', (data, binary) => { if (binary) chunks.push(data); });
+  let closed = false; owner.on('close', () => { closed = true; });
+  receiver.pause(); flood(owner);
+  await until(() => relayedSender.isPaused, 'the relay to pause the sender');
+  receiver.resume();
+  await until(() => chunks.length === 512, 'every relayed message');
+  await until(() => !relayedSender.isPaused, 'the relay to resume the sender');
+  assert.equal(closed, false);
+  // 512 KiB, plus at most one 64 KiB socket read already parsed when the sender is paused.
+  assert.ok(peak <= 640 * 1024, `The relay buffered ${peak} bytes for one receiver`);
+  chunks.forEach((chunk, i) => assert.ok(chunk.equals(Buffer.alloc(60 * 1024, i % 251)), `Message ${i} arrived intact and in order`));
+});
+
+test('a flood of tiny messages is paused by count, not only by bytes', { timeout: 20000 }, async t => {
+  const { owner, receiver, relayedSender, relayedReceiver } = await relayPair(t);
+  // Each queued message costs heap however small it is, so bytes alone do not bound memory.
+  let queued = 0, peak = 0; const send = relayedReceiver.send;
+  relayedReceiver.send = function (data, options, callback) {
+    queued++; peak = Math.max(peak, queued);
+    return send.call(this, data, options, (...args) => { queued--; callback?.(...args); });
+  };
+  let delivered = 0; receiver.on('message', (data, binary) => { if (binary) delivered++; });
+  receiver.pause();
+  for (let i = 0; i < 200_000; i++) owner.send(Buffer.alloc(64, i & 255)); // About 13 MiB on the wire.
+  await until(() => relayedSender.isPaused, 'the relay to pause the sender');
+  await delay(200);
+  // 256 messages, plus at most one 64 KiB socket read of 70-byte frames (about 940).
+  assert.ok(peak <= 1_300, `The relay queued ${peak} messages for one receiver`);
+  receiver.resume();
+  await until(() => delivered === 200_000, 'every tiny message');
+});
+
+test('a receiver that leaves while the relay holds the sender frees the link for the next recipient', { timeout: 20000 }, async t => {
+  const { connect, owner, room, receiver, relayedSender } = await relayPair(t);
+  receiver.pause(); flood(owner);
+  await until(() => relayedSender.isPaused, 'the relay to pause the sender');
+  const left = nextMessageOrClose(owner); receiver.terminate();
+  assert.equal((await left).type, 'peer-left');
+  // The pong proves the relay reads the sender again, after the rest of its backlog.
+  await publish(owner, { count: 1, totalBytes: 1, names: [] });
+  const next = await connect(); const joined = message(next); const ownerJoined = message(owner);
+  next.send(JSON.stringify({ type: 'join', room }));
+  assert.equal((await joined).type, 'joined'); assert.equal((await ownerJoined).type, 'peer-joined');
+  const signalled = message(next); owner.send(JSON.stringify({ type: 'signal', payload: 'relay for the next session' }));
+  assert.equal((await signalled).type, 'signal');
+  const delivery = once(next, 'message'); owner.send(Buffer.from('next recipient'));
+  assert.equal((await delivery)[0].toString(), 'next recipient');
+});
+
+test('a new receiver never gets data the sender queued for the previous one', { timeout: 20000 }, async t => {
+  const { connect, owner, room, receiver } = await relayPair(t);
+  const left = message(owner); receiver.terminate(); assert.equal((await left).type, 'peer-left');
+  const next = await connect(); const joined = message(next); const ownerJoined = message(owner);
+  next.send(JSON.stringify({ type: 'join', room }));
+  assert.equal((await joined).type, 'joined'); assert.equal((await ownerJoined).type, 'peer-joined');
+  const delivered = []; next.on('message', (data, binary) => delivered.push(binary ? `binary:${data}` : JSON.parse(data).type));
+  // Ciphertext for the previous session can still be crossing a slow upload when the next receiver joins.
+  // The sender's first message for the new session is a signal, so it follows all of that data.
+  owner.send(Buffer.from('previous session'));
+  owner.send(JSON.stringify({ type: 'signal', payload: 'relay for the next session' }));
+  owner.send(Buffer.from('next session'));
+  await until(() => delivered.includes('binary:next session'), 'the next session to arrive');
+  assert.deepEqual(delivered, ['signal', 'binary:next session']);
+});
+
+test('the liveness check keeps a socket whose messages keep arriving and drops a silent one', { timeout: 20000 }, async t => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  const { url } = await setup(t);
+  // A slow upload can hold a sender's pong behind megabytes of file data; autoPong: false models that.
+  const open = async () => { const ws = new WebSocket(url, { origin: 'https://meatproxy.to', autoPong: false }); await once(ws, 'open'); const created = message(ws); ws.send(JSON.stringify({ type: 'create' })); await created; return ws; };
+  const busy = await open(), silent = await open();
+  const silentClosed = once(silent, 'close');
+  for (let tick = 0; tick < 3; tick++) {
+    await publish(busy, { count: 0, totalBytes: 0, names: [] });
+    t.mock.timers.tick(25_000);
+  }
+  await silentClosed;
+  assert.equal(busy.readyState, WebSocket.OPEN);
+});
+
+test('a sender held during the interval survives a liveness check that lands just after it resumes', { timeout: 20000 }, async t => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  const { owner, receiver, relayedSender } = await relayPair(t);
+  receiver.pause(); flood(owner);
+  await until(() => relayedSender.isPaused, 'the relay to pause the sender');
+  const left = nextMessageOrClose(owner);
+  t.mock.timers.tick(25_000);
+  // The receiver drained just enough to release the sender, which has not read its pong yet.
+  relayedSender.resume();
+  t.mock.timers.tick(25_000);
+  assert.equal((await left).type, 'peer-left');
+  await publish(owner, { count: 0, totalBytes: 0, names: [] });
+});
+
+test('two sockets that flood each other and stop reading are both dropped by the liveness check', { timeout: 20000 }, async t => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  const { owner, receiver, relayedSender, relayedReceiver } = await relayPair(t);
+  owner.pause(); receiver.pause(); flood(owner); flood(receiver);
+  await until(() => relayedSender.isPaused && relayedReceiver.isPaused, 'the relay to pause both sockets');
+  const closed = Promise.all([once(owner, 'close'), once(receiver, 'close')]);
+  t.mock.timers.tick(25_000);
+  t.mock.timers.tick(25_000);
+  await closed;
+});
+
+test('the liveness check drops a stalled receiver but keeps the sender the relay is holding', { timeout: 20000 }, async t => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  const { owner, receiver, relayedSender } = await relayPair(t);
+  receiver.pause(); flood(owner);
+  await until(() => relayedSender.isPaused, 'the relay to pause the sender');
+  const left = nextMessageOrClose(owner);
+  t.mock.timers.tick(25_000); // Neither socket can return this ping's pong while it is paused.
+  t.mock.timers.tick(25_000);
+  assert.equal((await left).type, 'peer-left');
+  await publish(owner, { count: 0, totalBytes: 0, names: [] });
+  assert.equal(owner.readyState, WebSocket.OPEN);
 });
 
 test('cross-origin sockets are refused and malformed messages do not crash the server', async t => {
