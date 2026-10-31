@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Send files and notes with a link. Encrypted, straight from your browser. No signup.">
+  <meta name="theme-color" content="#f7f5ee">
+  <title>Meatproxy — Send files & notes.</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <a href="/" class="brand" aria-label="Meatproxy home"><svg viewBox="0 0 36 36" aria-hidden="true"><path d="M6 25V11h5l7 9 7-9h5v14h-6v-6l-6 7-6-7v6z" fill="currentColor"/></svg>meatproxy<span class="brand-dot">.</span></a>
+    <span class="privacy-label"><svg viewBox="0 0 20 20" aria-hidden="true"><rect x="4" y="9" width="12" height="9" rx="2"/><path d="M7 9V6a3 3 0 0 1 6 0v3"/></svg>Encrypted</span>
+  </header>
+  <main>
+    <section class="intro">
+      <h1 id="headline">Send files <span>& notes.</span></h1>
+      <p id="lead">Add them below. Share the link.</p>
+    </section>
+    <div class="workspace">
+      <section class="card contents-card" aria-labelledby="content-title">
+        <div class="card-top"><span class="step" id="content-step" aria-hidden="true">1</span><h2 id="content-title">Add files or a note</h2></div>
+        <div id="sender-controls">
+          <div class="tabs" role="tablist" aria-label="What to send">
+            <button id="files-tab" role="tab" aria-selected="true" aria-controls="files-panel">Files</button>
+            <button id="note-tab" role="tab" aria-selected="false" aria-controls="note-panel" tabindex="-1">Note</button>
+          </div>
+          <div id="files-panel" role="tabpanel" aria-labelledby="files-tab">
+            <button class="dropzone" id="dropzone" type="button" aria-label="Choose files">
+              <svg viewBox="0 0 40 40" aria-hidden="true"><path d="M20 27V7m-7 7 7-7 7 7M9 26v7h22v-7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              <strong>Choose files</strong><span>or drop them here</span>
+            </button>
+            <input id="file-input" type="file" multiple hidden>
+          </div>
+          <div id="note-panel" role="tabpanel" aria-labelledby="note-tab" hidden>
+            <label for="note" class="sr-only">Your note</label>
+            <textarea id="note" placeholder="A message, a brief, instructions for an agent…" maxlength="200000" rows="4"></textarea>
+            <button class="secondary" id="add-note">Add note</button>
+          </div>
+          <p class="limit">Any file type · Up to 256 MB</p>
+        </div>
+        <div id="receive-intro" class="receive-intro" hidden><span class="receive-mark" aria-hidden="true">↓</span><p>Files arrive here automatically.</p></div>
+        <details id="queued-files" class="queued-files" hidden>
+          <summary id="file-count" aria-live="polite">0 files added</summary>
+          <div class="file-list" id="file-list" aria-label="Files"></div>
+        </details>
+        <div id="receive-actions" class="receive-actions" hidden>
+          <button id="download-all" class="primary" disabled>Save all files ↓</button>
+          <button id="copy-agent" class="secondary" disabled>Copy notes</button>
+        </div>
+      </section>
+      <div class="side-column">
+        <section class="card share-card" aria-labelledby="share-title">
+          <div class="card-top"><span class="step" id="share-step" aria-hidden="true">2</span><h2 id="share-title">Share the link</h2></div>
+          <div id="share-controls">
+            <label for="share-link" class="sr-only">Private sharing link</label>
+            <input id="share-link" readonly value="Creating your link…" spellcheck="false">
+            <button class="primary" id="copy-link" disabled>Copy link ↗</button>
+          </div>
+          <p class="keep-open" id="keep-open-text">Keep this tab open until sent.</p>
+          <div class="status-block" role="status"><span class="status-dot" id="status-dot" aria-hidden="true"></span><div><strong id="status">Creating your link…</strong><p id="status-detail"></p></div></div>
+          <progress id="progress" value="0" max="100" hidden aria-label="Transfer progress"></progress>
+          <div class="transfer-meta" id="transfer-meta"></div>
+          <button id="retry" class="secondary" hidden>Reconnect</button>
+        </section>
+        <details class="agent-guide">
+          <summary id="agent-title">Send to an agent</summary>
+          <p><a href="/receive.mjs" download="meatproxy-receive.mjs">Download the receiver</a>. With Node.js 22 or newer, run:</p>
+          <pre id="agent-command">Creating your link…</pre>
+          <button class="secondary" id="copy-command" disabled>Copy command</button>
+          <p id="agent-tip">The agent gets files in a folder. Nothing runs automatically. Keep this tab open.</p>
+        </details>
+      </div>
+    </div>
+    <p class="notice" id="notice" role="alert" hidden></p>
+  </main>
+  <footer>
+    <details><summary>How it works</summary><p>Open a link to receive files automatically. Keep both tabs open until the transfer finishes, then save your files.</p><p>Files and notes are encrypted. They travel directly when possible, or through an encrypted relay. Files are never stored on our server.</p><p>Anyone with the complete link can receive. One recipient at a time, up to 100 files and 256 MB. Links expire when the sender leaves or after 12 hours.</p></details>
+    <a href="https://github.com/krunkosaurus/meatproxy" target="_blank" rel="noopener noreferrer">GitHub ↗</a>
+  </footer>
+  <noscript>Meatproxy needs JavaScript to encrypt and send files between browsers.</noscript>
+</body>
+</html>
