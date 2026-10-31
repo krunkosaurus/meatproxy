@@ -81,6 +81,8 @@ textarea::placeholder { color: var(--muted); opacity: 1; }
 #invite-summary { font-weight: 600; }
 #invite-names { overflow-wrap: anywhere; color: var(--muted); }
 .receive-invite .invite-help { margin: 14px 0 0; color: var(--muted); }
+#accept-folder { margin-top: 10px; }
+#save-feedback { margin: 0; color: var(--muted); }
 .keep-open { color: var(--muted); margin: 12px 0 0; text-align: center; font-size: 14px; }
 .status-block { display: flex; gap: 10px; padding-top: 18px; margin-top: 18px; border-top: 1px solid var(--line); overflow-wrap: anywhere; }
 .status-dot { width: 8px; height: 8px; flex-shrink: 0; margin-top: 8px; border-radius: 50%; background: var(--muted); }

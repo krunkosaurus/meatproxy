@@ -14,7 +14,11 @@ Added files appear immediately in an expanded list, the drop area becomes **Add 
 
 The current prototype supports 100 files, 512 MiB total, and one connected recipient per link. A second recipient can connect after the first leaves. Links expire when the sender closes/reloads their page, the signaling connection ends, or 12 hours elapse. Sender file handles are held only in the page; refreshing cannot restore them. Files added after the initial delivery are sent while the receiver stays connected. During an active transfer, the UI asks the sender to wait before adding more files; these additions are not queued.
 
-The browser receiver holds completed files in memory. Large handoffs are best tested on desktop. Mobile backgrounding, device sleep, Safari, and Firefox have not yet been verified. This prototype restarts interrupted transfers rather than resuming partial files. Folder hierarchy is not preserved.
+For large handoffs, supporting browsers offer **Receive to a folder** before acceptance. Choose a destination and Meatproxy creates a new subfolder for this connection, streams incoming files to disk, and commits each file only after SHA-256 verification. Duplicate filenames get numbered names; existing files outside the new folder are untouched. A failed file is aborted and its unfinished entry is removed. Completed files remain saved if a later file fails. Reconnecting creates another subfolder.
+
+The regular **Accept files** flow works without folder access. It retains browser-managed Blobs for downloading, so very large handoffs can still use substantial browser storage or memory. Both flows hash incrementally in a worker, using bounded reads and receive buffers instead of full-file JavaScript arrays. Multiple-file ZIP checksums also run in a separate worker, with preparation progress, so saving does not block the interface or incoming acknowledgements. File-system access is feature-detected; browsers without the folder picker use the regular download flow.
+
+Mobile backgrounding, device sleep, Safari, and Firefox have not yet been verified. This prototype restarts interrupted transfers rather than resuming partial files. Folder hierarchy is not preserved.
 
 ## Receive with an agent
 
@@ -35,7 +39,7 @@ npm run build
 npm start
 ```
 
-Open http://localhost:3477. The first page creates a room; its address becomes the recipient URL. `npm run build` bundles the shared crypto protocol and the Node receiver source into `public/receive.mjs`, and regenerates the brand images. Regenerate it after changes to these sources.
+Open http://localhost:3477. The first page creates a room; its address becomes the recipient URL. `npm run build` bundles the shared crypto protocol and the Node receiver source into `public/receive.mjs`, builds the browser file worker, and regenerates the brand images. Regenerate it after changes to these sources. The file worker uses the pinned `@noble/hashes` SHA-256 implementation; its MIT license is shipped as `public/hashes-LICENSE.txt`. Build dependencies are not loaded from a CDN or needed by the production server.
 
 ```sh
 npm run check
