@@ -68,8 +68,9 @@ test('actual composer removes files, edits/cancels notes and updates capacity', 
 });
 
 test('actual browser relay locks announced files, queues additions before completion, verifies and saves intact bytes', { timeout: 20000 }, async t => {
+  const payloadBytes = 6 * 1024 * 1024; // Larger than the 4 MiB window, so the sender waits for ACKs.
   const sender = await page(t, await server(t));
-  await sender.run('add', { files: [{ name: 'payload.bin', size: 4 * 1024 * 1024 }] });
+  await sender.run('add', { files: [{ name: 'payload.bin', size: payloadBytes }] });
   const ready = await sender.until(s => s.rows.length === 1 && s.link.startsWith('http'));
   const receiver = await page(t, ready.link, { receiveDelay: 30 });
   await receiver.until(s => s.status === 'Sender online');
@@ -84,9 +85,9 @@ test('actual browser relay locks announced files, queues additions before comple
   await receiver.run('click', { element: 'download-all' });
   const downloads = await receiver.run('downloads');
   assert.equal(downloads[0].name, 'meatproxy-handoff.zip');
-  assert.ok(downloads[0].size > 4 * 1024 * 1024);
+  assert.ok(downloads[0].size > payloadBytes);
   assert.deepEqual(downloads[0].entries, [
-    { name: 'payload.bin', sha256: createHash('sha256').update(new Uint8Array(4 * 1024 * 1024).fill(71)).digest('hex') },
+    { name: 'payload.bin', sha256: createHash('sha256').update(new Uint8Array(payloadBytes).fill(71)).digest('hex') },
     { name: 'HANDOFF.md', sha256: createHash('sha256').update('Queued while sending\n').digest('hex') },
   ]);
   await receiver.run('click', { label: 'Save payload.bin' });
