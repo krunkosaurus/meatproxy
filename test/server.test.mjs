@@ -25,6 +25,18 @@ async function publish(owner, preview) {
   owner.send(JSON.stringify({ type: 'preview', ...preview })); owner.ping(); await processed;
 }
 
+test('browser worker and imported handoff modules are served as JavaScript', async t => {
+  const { app } = await setup(t);
+  const base = `http://127.0.0.1:${app.server.address().port}`;
+  for (const path of ['/file-worker.js', '/file-tasks.js', '/handoff.js']) {
+    const response = await fetch(base + path);
+    assert.equal(response.status, 200, path);
+    assert.match(response.headers.get('content-type'), /text\/javascript/);
+    assert.ok((await response.text()).length > 100);
+  }
+  assert.match(await fetch(base + '/hashes-LICENSE.txt').then(response => response.text()), /MIT License/);
+});
+
 test('social crawlers get a valid public preview without exposing or joining a handoff', async t => {
   const { app, connect } = await setup(t);
   const { room } = await create(connect);

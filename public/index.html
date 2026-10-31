@@ -59,6 +59,7 @@
             <label for="note" class="sr-only">Your note</label>
             <textarea id="note" placeholder="A message, a brief, instructions for an agent…" maxlength="200000" rows="4"></textarea>
             <button class="secondary" id="add-note">Add note</button>
+            <button class="text-button" id="cancel-note" hidden>Cancel edit</button>
           </div>
           <p class="limit">Any file type · Up to 512 MB</p>
           <p id="add-feedback" class="add-feedback" role="status" hidden></p>
@@ -73,6 +74,7 @@
         </div>
         <div id="receive-intro" class="receive-intro" hidden><span class="receive-mark" aria-hidden="true">↓</span><p>Your files will appear here.</p></div>
         <div id="queued-files" class="queued-files" hidden>
+          <p id="queue-summary" class="queue-summary"></p>
           <div class="file-list" id="file-list" aria-label="Files"></div>
         </div>
         <div id="receive-actions" class="receive-actions" hidden>
