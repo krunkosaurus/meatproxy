@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { connect as connectTCP } from 'node:net';
+import { setTimeout as delay } from 'node:timers/promises';
 import WebSocket from 'ws';
 import { createApp, fingerprint, securityHeaders } from '../server.mjs';
 import { makeSecret, importSecret, encrypt, decrypt, validateManifest } from '../public/protocol.js';
@@ -25,6 +26,21 @@ async function publish(owner, preview) {
   const processed = once(owner, 'pong');
   owner.send(JSON.stringify({ type: 'preview', ...preview })); owner.ping(); await processed;
 }
+async function until(predicate, label) {
+  for (let attempt = 0; attempt < 1000; attempt++) { if (predicate()) return; await delay(10); }
+  assert.fail(`Timed out waiting for ${label}`);
+}
+async function relayPair(t) {
+  const { app, connect } = await setup(t); const { owner, room } = await create(connect);
+  const receiver = await connect(); const joined = message(receiver); const ownerJoined = message(owner);
+  receiver.send(JSON.stringify({ type: 'join', room }));
+  assert.equal((await joined).type, 'joined'); assert.equal((await ownerJoined).type, 'peer-joined');
+  const relayed = [...app.wss.clients];
+  return { connect, owner, room, receiver, relayedSender: relayed.find(ws => ws.owner), relayedReceiver: relayed.find(ws => ws.owner === false) };
+}
+// 30 MiB in messages under the 64 KiB limit: far more than the sockets between the peers can hold.
+const flood = owner => { for (let i = 0; i < 512; i++) owner.send(Buffer.alloc(60 * 1024, i % 251)); };
+const nextMessageOrClose = ws => Promise.race([message(ws), once(ws, 'close').then(([code]) => ({ type: `closed ${code}` }))]);
 
 test('browser worker and imported handoff modules are served as JavaScript', async t => {
   const { app } = await setup(t);
@@ -279,6 +295,50 @@ test('closing sender expires the room and notifies the receiver', async t => {
   const receiver = await connect(); const joined = message(receiver); receiver.send(JSON.stringify({ type: 'join', room })); await joined;
   const left = message(receiver); owner.close(); assert.equal((await left).type, 'sender-left'); assert.equal(app.rooms.has(room), false);
   const later = await connect(); const unavailable = message(later); later.send(JSON.stringify({ type: 'join', room })); assert.equal((await unavailable).type, 'unavailable');
+});
+
+test('a slow receiver pauses the relay sender instead of disconnecting it; every byte then arrives in order', { timeout: 20000 }, async t => {
+  const { owner, receiver, relayedSender, relayedReceiver } = await relayPair(t);
+  let peak = 0; const send = relayedReceiver.send;
+  relayedReceiver.send = function (...args) { const result = send.apply(this, args); peak = Math.max(peak, this.bufferedAmount); return result; };
+  const chunks = []; receiver.on('message', (data, binary) => { if (binary) chunks.push(data); });
+  let closed = false; owner.on('close', () => { closed = true; });
+  receiver.pause(); flood(owner);
+  await until(() => relayedSender.isPaused, 'the relay to pause the sender');
+  receiver.resume();
+  await until(() => chunks.length === 512, 'every relayed message');
+  await until(() => !relayedSender.isPaused, 'the relay to resume the sender');
+  assert.equal(closed, false);
+  assert.ok(peak <= 1024 * 1024, `The relay buffered ${peak} bytes for one receiver`);
+  chunks.forEach((chunk, i) => assert.ok(chunk.equals(Buffer.alloc(60 * 1024, i % 251)), `Message ${i} arrived intact and in order`));
+});
+
+test('a receiver that leaves while the relay holds the sender frees the link for the next recipient', { timeout: 20000 }, async t => {
+  const { connect, owner, room, receiver, relayedSender } = await relayPair(t);
+  receiver.pause(); flood(owner);
+  await until(() => relayedSender.isPaused, 'the relay to pause the sender');
+  const left = nextMessageOrClose(owner); receiver.terminate();
+  assert.equal((await left).type, 'peer-left');
+  // The pong proves the relay reads the sender again, after the rest of its backlog.
+  await publish(owner, { count: 1, totalBytes: 1, names: [] });
+  const next = await connect(); const joined = message(next); const ownerJoined = message(owner);
+  next.send(JSON.stringify({ type: 'join', room }));
+  assert.equal((await joined).type, 'joined'); assert.equal((await ownerJoined).type, 'peer-joined');
+  const delivery = once(next, 'message'); owner.send(Buffer.from('next recipient'));
+  assert.equal((await delivery)[0].toString(), 'next recipient');
+});
+
+test('the liveness check drops a stalled receiver but keeps the sender the relay is holding', { timeout: 20000 }, async t => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  const { owner, receiver, relayedSender } = await relayPair(t);
+  receiver.pause(); flood(owner);
+  await until(() => relayedSender.isPaused, 'the relay to pause the sender');
+  const left = nextMessageOrClose(owner);
+  t.mock.timers.tick(25_000); // Neither socket can return this ping's pong while it is paused.
+  t.mock.timers.tick(25_000);
+  assert.equal((await left).type, 'peer-left');
+  await publish(owner, { count: 0, totalBytes: 0, names: [] });
+  assert.equal(owner.readyState, WebSocket.OPEN);
 });
 
 test('cross-origin sockets are refused and malformed messages do not crash the server', async t => {

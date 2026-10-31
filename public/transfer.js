@@ -23,9 +23,10 @@ export function waitForDataChannel(channel) {
 }
 
 // Stream small files through to the final checksum without stopping for an ACK.
-// Larger files pipeline ACKs. Relay traffic stays below the server's 1 MiB buffer.
-export async function streamFile(file, { transport, send, waitForAck, onConfirmed }) {
-  const window = transport === 'direct' ? 16 : 3;
+// Larger files pipeline ACKs, at most 4 MiB ahead. The relay pauses a sender whose
+// receiver falls behind, so both transports share this window.
+export async function streamFile(file, { send, waitForAck, onConfirmed }) {
+  const window = 16;
   const pending = [];
   for (let base = 0; base < file.size; base += READ_BYTES) {
     const block = new Uint8Array(await file.slice(base, Math.min(base + READ_BYTES, file.size)).arrayBuffer());
@@ -42,6 +43,32 @@ export async function streamFile(file, { transport, send, waitForAck, onConfirme
     }
   }
   // The caller sends end next and waits for the receiver's verified checksum.
+}
+
+// A full window can take longer than the timeout to drain on a slow link, so every
+// acknowledgement renews the remaining deadlines. Only a stalled receiver times out.
+export function createWaiters(timeout = 30_000) {
+  const waiters = new Map();
+  const expire = id => {
+    const waiter = waiters.get(id); waiters.delete(id);
+    waiter.reject(new Error('The other browser stopped responding. Reconnect and try again.'));
+  };
+  return {
+    wait(id) {
+      const promise = new Promise((resolve, reject) => { waiters.set(id, { resolve, reject, timer: setTimeout(expire, timeout, id) }); });
+      promise.catch(() => {}); return promise;
+    },
+    resolve(id, value) {
+      const waiter = waiters.get(id);
+      if (!waiter) return;
+      waiters.delete(id); clearTimeout(waiter.timer); waiter.resolve(value);
+      for (const [other, entry] of waiters) { clearTimeout(entry.timer); entry.timer = setTimeout(expire, timeout, other); }
+    },
+    rejectAll(error) {
+      for (const waiter of waiters.values()) { clearTimeout(waiter.timer); waiter.reject(error); }
+      waiters.clear();
+    },
+  };
 }
 
 export class TransferMeter {

@@ -59,6 +59,8 @@ const built = fingerprint(new Map(await Promise.all([...assets, ['/index.html', 
 const versioned = path => `${path}?v=${built.get(path).version}`;
 const tokenPattern = /^[A-Za-z0-9_-]{22}$/;
 const roomLifetime = 12 * 60 * 60 * 1000;
+// Above this, the relay stops reading from a sender until its receiver catches up.
+const relayBufferBytes = 512 * 1024;
 const escapeHTML = value => value.replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
 
 function previewOf(room) {
@@ -141,8 +143,10 @@ export function createApp({ origin = process.env.PUBLIC_ORIGIN, maxClients = 200
       if (binary) {
         const peer = ws.owner ? ws.room?.guest : ws.room?.owner;
         if (!peer || peer.readyState !== WebSocket.OPEN) return;
-        if (peer.bufferedAmount > 1024 * 1024) { ws.close(1008, 'Receiver is too slow; reconnect'); return; }
-        peer.send(data, { binary: true });
+        // Pausing lets TCP slow the sender's browser. Write callbacks also fire, with an
+        // error, when the receiver's socket is destroyed, so a departed receiver releases it.
+        peer.send(data, { binary: true }, () => { if (ws.isPaused && peer.bufferedAmount <= relayBufferBytes) ws.resume(); });
+        if (peer.bufferedAmount > relayBufferBytes) ws.pause();
         return;
       }
       let msg;
@@ -187,7 +191,8 @@ export function createApp({ origin = process.env.PUBLIC_ORIGIN, maxClients = 200
   });
   const heartbeat = setInterval(() => {
     for (const ws of wss.clients) {
-      if (!ws.alive) { ws.terminate(); continue; }
+      // A paused sender cannot read its pong until its receiver drains or is dropped.
+      if (!ws.alive && !ws.isPaused) { ws.terminate(); continue; }
       ws.alive = false; ws.ping();
       if (ws.room && Date.now() - ws.room.created >= roomLifetime) ws.close(1000, 'Handoff expired after 12 hours');
     }
