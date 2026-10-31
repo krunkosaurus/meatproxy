@@ -237,12 +237,15 @@ export function createApp({ origin = process.env.PUBLIC_ORIGIN, maxClients = 200
     }
     // Nginx sets X-Real-IP to the client's address. Without a proxy (local development), no per-address limits apply.
     const keys = req.headers['x-real-ip'] ? addressKeys(req.headers['x-real-ip']) : null;
-    const over = factor => keys && ((connections.get(keys.address) || 0) >= factor * maxConnections.address || (connections.get(keys.network) || 0) >= factor * maxConnections.network);
-    const refused = over(1);
+    const held = key => connections.get(key) || 0;
+    const refused = keys && (held(keys.address) >= maxConnections.address || held(keys.network) >= maxConnections.network);
     // A few extra sockets open only to be closed with a reason the page can show; beyond that, 429.
-    if (over(2) || (refused && refusing >= maxRefusing)) { socket.end('HTTP/1.1 429 Too Many Requests\r\nConnection: close\r\n\r\n'); return; }
+    if ((keys && held(keys.address) >= 2 * maxConnections.address) || (refused && refusing >= maxRefusing)) { socket.end('HTTP/1.1 429 Too Many Requests\r\nConnection: close\r\n\r\n'); return; }
     // Counted from the handshake until the socket closes, so refused or lingering sockets cannot pile up.
-    if (keys) { count(connections, keys.address, 1); count(connections, keys.network, 1); socket.once('close', () => { count(connections, keys.address, -1); count(connections, keys.network, -1); }); }
+    // Refused sockets count only toward their own address, so they cannot fill the network for its neighbours.
+    const counted = !keys ? [] : refused ? [keys.address] : [keys.address, keys.network];
+    for (const key of counted) count(connections, key, 1);
+    socket.once('close', () => { for (const key of counted) count(connections, key, -1); });
     if (refused) { refusing++; socket.once('close', () => { refusing--; }); }
     wss.handleUpgrade(req, socket, head, ws => {
       ws.keys = keys;
