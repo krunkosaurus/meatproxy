@@ -491,8 +491,8 @@ test('signals count their bytes on the wire, per receiver connection', { timeout
   assert.equal(await closed, '4001 Connection setup limit reached');
 });
 
-test('reconnecting cannot turn signals into a pipe: they have a daily allowance per address, not per network', { timeout: 10000 }, async t => {
-  const { connect } = await setup(t, { limits: { signals: 10_000, addressSignals: 20_000 } });
+test('reconnecting cannot turn signals into a pipe: they have a daily allowance per address and per network', { timeout: 10000 }, async t => {
+  const { connect } = await setup(t, { limits: { signals: 10_000, addressSignals: 20_000, networkSignals: 40_000 } });
   const signal = JSON.stringify({ type: 'signal', payload: 'x'.repeat(5_970) }); // About 6 KB per receiver connection.
   const accepted = async address => {
     const { owner, receiver } = await limitedPair(connect, address);
@@ -506,8 +506,10 @@ test('reconnecting cannot turn signals into a pipe: they have a daily allowance 
   };
   for (let session = 0; session < 3; session++) await accepted('203.0.113.5');
   await refused('203.0.113.5');
-  // A neighbour cannot spend anyone else's allowance, so the rest of the /24 can still connect.
-  for (const neighbour of ['203.0.113.6', '203.0.113.7', '203.0.113.8', '203.0.113.9']) await accepted(neighbour);
+  // One address cannot spend its network's allowance, so a neighbour can still connect,
+  for (let session = 0; session < 3; session++) await accepted('203.0.113.6');
+  await refused('203.0.113.7'); // but rotating addresses stops at the network's.
+  await accepted('198.51.100.1');
 });
 
 test("a spent relay allowance, an address's or everyone's, never blocks setting up a direct connection", { timeout: 10000 }, async t => {
@@ -541,6 +543,18 @@ test('a handoff the remaining allowance cannot carry is refused at the start, no
   const left = nextJSON(owner); first.close(); await left; // The link has relayed 60,005 of its 100,000.
   const second = await joinRelay(connect, owner, room);
   assert.equal(await startRelay({ owner, receiver: second }), '4002 This link has used its relay allowance; ask the sender for a fresh link');
+});
+
+test('the start check counts whole slices, so a handoff is not admitted only to stop in its last slice', { timeout: 10000 }, async t => {
+  const link = '4002 This link has used its relay allowance; ask the sender for a fresh link';
+  const network = '4003 This network has used its relay allowance for now; try again later';
+  for (const [limits, address, refusal] of [[{ room: 65_000 }, undefined, link], [{ addressDaily: 65_000 }, '203.0.113.7', network]]) {
+    const { connect } = await setup(t, { limits: { slice: 10_000, ...limits } });
+    const { owner, room } = await create(connect);
+    await publish(owner, { count: 1, totalBytes: 60_000, names: [] }); // Fits 65,000, but its seventh slice would not.
+    const receiver = await joinRelay(connect, owner, room, address);
+    assert.equal(await startRelay({ owner, receiver }), refusal);
+  }
 });
 
 test('daily allowances are checked when a relay session starts, reserve its worst case, and refund the rest', { timeout: 15000 }, async t => {
@@ -615,25 +629,6 @@ const rawUpgrade = (t, app, address) => new Promise(resolve => {
   socket.once('data', chunk => resolve(Number(chunk.toString().split(' ')[1])));
   socket.write(`GET /socket HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: ${randomBytes(16).toString('base64')}\r\nSec-WebSocket-Version: 13\r\nX-Real-IP: ${address}\r\n\r\n`);
   t.after(() => socket.destroy());
-});
-
-test('recipients may join from one network in a burst, then about once a second', { timeout: 10000 }, async t => {
-  t.mock.timers.enable({ apis: ['Date'], now: Date.UTC(2026, 10, 1, 12) });
-  const { connect } = await setup(t, { joinRate: { perSecond: 1, burst: 2 } });
-  const join = async address => {
-    const { room } = await create(connect);
-    const receiver = await connect(address);
-    const outcome = Promise.race([message(receiver).then(msg => msg.type), closeOf(receiver)]);
-    receiver.send(JSON.stringify({ type: 'join', room }));
-    return outcome;
-  };
-  assert.equal(await join('203.0.113.1'), 'joined');
-  assert.equal(await join('203.0.113.2'), 'joined'); // Another address, but the same /24.
-  assert.equal(await join('203.0.113.3'), '4007 Too many recipients are joining from this network; try again in a minute');
-  assert.equal(await join('198.51.100.1'), 'joined', 'Other networks are unaffected');
-  t.mock.timers.tick(1_000);
-  assert.equal(await join('203.0.113.4'), 'joined');
-  for (let i = 0; i < 5; i++) assert.equal(await join(), 'joined'); // Without a proxy, joins are not limited.
 });
 
 test("sockets opened only to be refused take none of the service's slots, and their pool is small", { timeout: 10000 }, async t => {

@@ -8,7 +8,10 @@ import { mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createServer } from 'node:http';
+import { WebSocketServer } from 'ws';
 import { createApp } from '../server.mjs';
+import { makeSecret, importSecret, encrypt, encodeJSON, toBase64 } from '../public/protocol.js';
 
 async function page(t, url, options = {}) {
   const worker = new Worker(new URL('./app-fixture.mjs', import.meta.url), { workerData: { url, ...options } });
@@ -116,6 +119,28 @@ test('when a relay limit closes the sender, both pages and the Node receiver say
   const destination = await mkdtemp(join(tmpdir(), 'meatproxy-limit-'));
   t.after(() => rm(destination, { recursive: true, force: true }));
   const child = spawn(process.execPath, [fileURLToPath(new URL('../public/receive.mjs', import.meta.url)), agentReady.link, destination], { stdio: ['ignore', 'pipe', 'pipe'] });
+  t.after(() => child.kill());
+  let output = ''; child.stdout.on('data', chunk => { output += chunk; }); child.stderr.on('data', chunk => { output += chunk; });
+  assert.equal(await new Promise(resolve => child.on('exit', resolve)), 1);
+  assert.match(output, /The relay closed the sender's connection: Relay limit reached for this handoff\./);
+});
+
+test('the Node receiver reports why the sender left while it is still handling earlier messages', { timeout: 20000 }, async t => {
+  // A stand-in relay sends a backlog, then the reason, and closes at once.
+  const secret = makeSecret(), key = await importSecret(secret), room = 'A'.repeat(22);
+  const backlog = await Promise.all(Array.from({ length: 200 }, async () => JSON.stringify({ type: 'signal', payload: toBase64(await encrypt(key, encodeJSON({ type: 'candidate' }), `signal:${room}`)) })));
+  const http = createServer(), relay = new WebSocketServer({ server: http, path: '/socket' });
+  relay.on('connection', socket => socket.once('message', () => {
+    socket.send(JSON.stringify({ type: 'joined' }));
+    for (const message of backlog) socket.send(message);
+    socket.send(JSON.stringify({ type: 'sender-left', code: 4001, reason: 'Relay limit reached for this handoff' }));
+    socket.close(1000, 'Sender left');
+  }));
+  await new Promise(resolve => http.listen(0, '127.0.0.1', resolve));
+  t.after(() => { relay.close(); http.close(); });
+  const destination = await mkdtemp(join(tmpdir(), 'meatproxy-left-'));
+  t.after(() => rm(destination, { recursive: true, force: true }));
+  const child = spawn(process.execPath, [fileURLToPath(new URL('../public/receive.mjs', import.meta.url)), `http://127.0.0.1:${http.address().port}/s/${room}#${secret}`, destination], { stdio: ['ignore', 'pipe', 'pipe'] });
   t.after(() => child.kill());
   let output = ''; child.stdout.on('data', chunk => { output += chunk; }); child.stderr.on('data', chunk => { output += chunk; });
   assert.equal(await new Promise(resolve => child.on('exit', resolve)), 1);

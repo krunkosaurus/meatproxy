@@ -32,7 +32,8 @@ async function sendClientControl(value) {
 }
 clientSocket.onopen = () => { resetIdle(); clientSocket.send(JSON.stringify({ type: 'join', room: roomID })); };
 clientSocket.onerror = () => stop(new Error('Could not connect to Meatproxy.'));
-clientSocket.onclose = event => { if (!successful && !stopped) stop(new Error(event.reason ? `Meatproxy closed the connection: ${event.reason}.` : 'The sender disconnected before the handoff finished.')); };
+// Handle messages that arrived before the close first, such as why the sender left.
+clientSocket.onclose = event => { queue = queue.then(() => { if (!successful && !stopped) stop(new Error(event.reason ? `Meatproxy closed the connection: ${event.reason}.` : 'The sender disconnected before the handoff finished.')); }); };
 clientSocket.onmessage = event => {
   resetIdle();
   queue = queue.then(async () => {

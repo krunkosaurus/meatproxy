@@ -29,7 +29,6 @@ function relayLimit(code, own) {
     4004: isSender && !own ? "The relay has reached today's limit, so this recipient could not connect. Recipients who can connect directly are not affected." : "The relay has reached today's limit. Try again after 00:00 UTC.",
     4005: 'Too many Meatproxy connections from your network right now. Close other Meatproxy tabs or try again later.',
     4006: own ? "Your network has used today's connection setup allowance. Try again after 00:00 UTC." : `${other}'s network has used today's connection setup allowance.`,
-    4007: 'Too many people are joining from your network right now. Try again in a minute.',
   }[code];
 }
 function packet(value) { if (ws?.readyState !== WebSocket.OPEN) throw new Error('The connection closed. Start a new handoff.'); ws.send(JSON.stringify(value)); }
@@ -511,7 +510,7 @@ async function connect() {
       const limit = relayLimit(event.code, true), save = !isSender && received.size ? ' Save the files you have received.' : '';
       status('Connection closed', limit ? limit + save : event.reason ? `${event.reason}. ${advice}` : advice, 'error');
       // Reconnecting clears received files and cannot lift a relay limit; only a busy network can retry soon.
-      $('retry').hidden = isSender || (limit && event.code !== 4005 && event.code !== 4007);
+      $('retry').hidden = isSender || (limit && event.code !== 4005);
       updateMobileAction();
     }
   };
