@@ -72,14 +72,20 @@ function progress(p, finished = false) {
   updateMobileAction();
 }
 // A failed or frozen sender cannot tell the receiver, so a minute without any packet while files
-// remain is reported. It is not fatal: a frozen tab or a slow file read can resume.
+// remain is reported. It is not fatal: the warning clears if data arrives again, as after a slow file read.
 const SENDER_SILENCE_MS = 60_000;
+const silenceWarning = 'The sender has not sent anything for a minute. Their tab may be closed, asleep or offline. Keep waiting, or save the files you have and reconnect to start over.';
+// Clears only this warning, not another notice shown meanwhile.
+function clearSilence(p) {
+  if (!p?.stalled) return;
+  p.stalled = false;
+  if ($('notice').textContent === silenceWarning) notice('');
+}
 setInterval(() => {
   if (!peer || peer.closed || peer.failed) return;
   const silent = !isSender && peer.awaitingData && performance.now() - peer.heard > SENDER_SILENCE_MS;
   if (silent !== peer.stalled) {
-    peer.stalled = silent;
-    notice(silent ? 'The sender has not sent anything for a minute. Their tab may be closed, asleep or offline. Keep waiting, or save the files you have and reconnect to start over.' : '');
+    if (silent) { peer.stalled = true; notice(silenceWarning); } else clearSilence(peer);
     $('retry').hidden = !silent;
     updateMobileAction();
   }
@@ -302,6 +308,8 @@ async function onControl(p, message) {
     await sendControl(p, { type: 'received', id: item.meta.id });
     // Within a batch the sender starts the next file at once; it may have given up during a long save.
     p.awaitingData = files.some(file => !received.has(file.id)); p.heard = performance.now();
+    // Every announced file is here, even if the sender never confirms that it has finished.
+    if (!p.awaitingData) { status('Files received', 'Every file so far is verified. Save them before closing this tab.', 'active'); progress(p, true); }
   } else if (message.type === 'ack' && isSender) p.waiters.resolve(`ack:${message.id}:${message.offset}`);
   else if (message.type === 'received' && isSender) p.waiters.resolve(`done:${message.id}`);
   else if (message.type === 'complete' && !isSender) {
@@ -497,8 +505,9 @@ async function connect() {
         status('The recipient has left.', 'Your link is still live. Someone else can open it now.');
         renderFiles();
       } else if (msg.type === 'sender-left') {
-        abortIncoming(peer);
+        abortIncoming(peer); clearSilence(peer);
         ended = true; if (peer) { peer.closed = true; peer.pc?.close(); clearTimeout(peer.timer); }
+        $('retry').hidden = true; // Reconnecting needs a sender, and would clear received files.
         status('The sender has left.', received.size ? 'Your received files are still here. Save them before closing this tab.' : 'Ask the sender for a fresh link.');
       }
     }).catch(fail);
@@ -508,7 +517,7 @@ async function connect() {
     if (!ended) {
       if (peer?.transport === 'direct' && peer.dc?.readyState === 'open') { notice('The link service disconnected. Your current direct transfer can continue, but new recipients need a fresh link.'); return; }
       if (peer) { peer.progressActive = false; peer.closed = true; }
-      abortIncoming(peer);
+      abortIncoming(peer); clearSilence(peer);
       status('Connection closed', isSender ? 'Start a new handoff to make a fresh link.' : 'Save any completed files, then reconnect.', 'error');
       $('retry').hidden = isSender;
     }

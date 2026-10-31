@@ -38,7 +38,11 @@ Object.assign(globalThis, {
     terminate() { this.thread.terminate(); }
   },
 });
-Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { clipboard: { writeText: async text => { clipboard = text; } } } });
+let clipboardBlocked = false;
+Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { clipboard: { writeText: async text => { if (clipboardBlocked) throw new Error('Blocked'); clipboard = text; } } } });
+// Records the page's sockets so a test can make the page leave.
+const sockets = [];
+globalThis.WebSocket = class extends globalThis.WebSocket { constructor(...args) { super(...args); sockets.push(this); } };
 const nativeFetch = globalThis.fetch;
 globalThis.fetch = (url, options) => nativeFetch(new URL(url, location), options);
 
@@ -63,6 +67,8 @@ parentPort.on('message', async ({ id, command, ...args }) => {
       WebSocket.prototype.send = function (data) { queued.push([this, data]); };
       resume = () => { WebSocket.prototype.send = send; for (const [socket, data] of queued) send.call(socket, data); };
     } else if (command === 'resume') resume();
+    else if (command === 'leave') for (const socket of sockets) socket.close();
+    else if (command === 'blockClipboard') clipboardBlocked = true;
     else if (command === 'add') {
       const files = args.files.map(({ name, size, byte = 71 }) => new File([new Uint8Array(size).fill(byte)], name));
       $('file-input').onchange({ target: { files, value: '' } });

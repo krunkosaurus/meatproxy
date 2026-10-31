@@ -123,7 +123,7 @@ test('a receiver says when the sender goes silent mid-file, offers to reconnect,
   const stalled = await waitOutSilence(receiver);
   assert.match(stalled.notice, new RegExp(`^${silence} .*save the files you have and reconnect to start over`));
   assert.equal(stalled.mobile.action, 'retry');
-  await sender.run('resume'); // A frozen tab that wakes up finishes the transfer.
+  await sender.run('resume'); // Data arriving again, as after a slow file read, clears the warning.
   const done = await poll(receiver, s => s.status === 'All files received');
   assert.equal(done.notice, '');
 });
@@ -141,6 +141,70 @@ test('a receiver notices a sender that gives up after a file while more files re
   assert.match((await waitOutSilence(receiver)).notice, new RegExp(`^${silence}`));
   await sender.run('resume');
   assert.equal((await poll(receiver, s => s.status === 'All files received')).notice, '');
+});
+
+test('when the sender leaves after the warning, the warning and Reconnect go away', { timeout: 20000 }, async t => {
+  const sender = await page(t, await server(t));
+  await sender.run('add', { files: [{ name: 'payload.bin', size: 32 * 1024 * 1024 }] });
+  const ready = await sender.until(s => s.rows.length === 1 && s.link.startsWith('http'));
+  const receiver = await page(t, ready.link, { receiveDelay: 40 });
+  await receiver.until(s => s.status === 'Sender online');
+  await receiver.run('click', { element: 'accept-files' });
+  await receiver.until(s => s.status === 'Receiving payload.bin');
+  await sender.run('stall');
+  assert.equal((await waitOutSilence(receiver)).mobile.action, 'retry');
+  await sender.run('leave');
+  const left = await poll(receiver, s => s.status === 'The sender has left.');
+  assert.equal(left.notice, '');
+  assert.notEqual(left.mobile.action, 'retry', 'Reconnecting needs a sender');
+});
+
+test('data arriving again clears only the silence warning, not a later notice', { timeout: 20000 }, async t => {
+  const sender = await page(t, await server(t));
+  await sender.run('note', { text: 'Read me first' });
+  await sender.run('add', { files: [{ name: 'payload.bin', size: 32 * 1024 * 1024 }] });
+  const ready = await sender.until(s => s.rows.length === 2 && s.link.startsWith('http'));
+  const receiver = await page(t, ready.link, { receiveDelay: 40 });
+  await receiver.until(s => s.status === 'Sender online');
+  await receiver.run('click', { element: 'accept-files' });
+  await receiver.until(s => s.status === 'Receiving payload.bin');
+  await sender.run('stall');
+  await waitOutSilence(receiver);
+  await receiver.run('blockClipboard');
+  await receiver.run('click', { element: 'copy-agent' }); // Another notice replaces the warning.
+  await sender.run('resume');
+  const done = await poll(receiver, s => s.status === 'All files received');
+  assert.match(done.notice, /^Clipboard access was blocked/);
+});
+
+test('when the receiver loses its connection after the warning, the warning goes and Reconnect stays', { timeout: 20000 }, async t => {
+  const sender = await page(t, await server(t));
+  await sender.run('add', { files: [{ name: 'payload.bin', size: 32 * 1024 * 1024 }] });
+  const ready = await sender.until(s => s.rows.length === 1 && s.link.startsWith('http'));
+  const receiver = await page(t, ready.link, { receiveDelay: 40 });
+  await receiver.until(s => s.status === 'Sender online');
+  await receiver.run('click', { element: 'accept-files' });
+  await receiver.until(s => s.status === 'Receiving payload.bin');
+  await sender.run('stall');
+  await waitOutSilence(receiver);
+  await receiver.run('leave');
+  const closed = await poll(receiver, s => s.status === 'Connection closed');
+  assert.equal(closed.notice, '');
+  assert.equal(closed.mobile.action, 'retry');
+});
+
+test('a receiver whose sender never confirms the last file offers to save instead of waiting', { timeout: 20000 }, async t => {
+  const sender = await page(t, await server(t));
+  await sender.run('add', { files: [{ name: 'a.bin', size: 1024 * 1024 }] });
+  const ready = await sender.until(s => s.rows.length === 1 && s.link.startsWith('http'));
+  const receiver = await page(t, ready.link, { finishDelay: 1000 });
+  await receiver.until(s => s.status === 'Sender online');
+  await receiver.run('click', { element: 'accept-files' });
+  await receiver.until(s => s.finishing);
+  await sender.run('stall'); // The sender's completion message never leaves.
+  const saved = await receiver.until(s => s.status === 'Files received');
+  assert.equal(saved.mobile.action, 'save');
+  assert.equal(saved.notice, '');
 });
 
 test('a receiver waits quietly while it saves a file or the sender prepares the next one', { timeout: 20000 }, async t => {
