@@ -4,7 +4,7 @@ import { Worker } from 'node:worker_threads';
 import { createHash } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { spawn } from 'node:child_process';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -131,9 +131,61 @@ test('when a link has used its relay allowance, each page says what to do instea
   await receiver.run('click', { element: 'accept-files' });
   const refused = await receiver.until(s => s.status === 'Connection closed');
   assert.equal(refused.detail, 'This link has used its relay allowance. Ask the sender for a fresh link.');
-  assert.notEqual(refused.mobile.action, 'retry');
+  assert.equal(refused.retry, false); assert.notEqual(refused.mobile.action, 'retry');
   const left = await sender.until(s => s.status === 'The recipient has left.');
   assert.equal(left.detail, 'This link has used its relay allowance. Start a new handoff to make a fresh link.');
+});
+
+test('a relay limit reached partway keeps received files and says to save them instead of offering Reconnect', { timeout: 20000 }, async t => {
+  // Four 256 KiB slices a day. a.bin fits; b.bin, added later, runs out partway.
+  const sender = await page(t, await server(t, { limits: { slice: 256 * 1024, daily: 1024 * 1024 } }));
+  await sender.run('add', { files: [{ name: 'a.bin', size: 300_000 }] });
+  const ready = await sender.until(s => s.rows.length === 1 && s.link.startsWith('http'));
+  const receiver = await page(t, ready.link);
+  await receiver.until(s => s.status === 'Sender online');
+  await receiver.run('click', { element: 'accept-files' });
+  await receiver.until(s => s.rows.some(row => row.name === 'a.bin' && row.detail.includes('verified')));
+  await sender.run('add', { files: [{ name: 'b.bin', size: 3 * 1024 * 1024, byte: 72 }] });
+  const stopped = await receiver.until(s => s.status === 'Connection closed');
+  assert.equal(stopped.detail, "The relay has reached today's limit. Try again after 00:00 UTC. Save the files you have received.");
+  assert.deepEqual(stopped.rows.map(row => row.detail.split(' · ').pop()), ['verified', 'Interrupted']);
+  assert.equal(stopped.retry, false, 'Reconnecting would clear a.bin and be refused again');
+  assert.equal(stopped.mobile.action, 'save');
+  const left = await sender.until(s => s.status === 'The recipient has left.');
+  assert.match(left.detail, /^The relay has reached today's limit, so this recipient could not connect\. Recipients who can connect directly are not affected\./);
+});
+
+test('the Node receiver can run again into the same folder, including after an interrupted run', { timeout: 30000 }, async t => {
+  const sender = await page(t, await server(t));
+  await sender.run('add', { files: [{ name: 'one.bin', size: 32 * 1024 * 1024 }] });
+  const ready = await sender.until(s => s.rows.length === 1 && s.link.startsWith('http'));
+  const destination = await mkdtemp(join(tmpdir(), 'meatproxy-rerun-'));
+  t.after(() => rm(destination, { recursive: true, force: true }));
+  const run = () => {
+    const child = spawn(process.execPath, [fileURLToPath(new URL('../public/receive.mjs', import.meta.url)), ready.link, destination], { stdio: ['ignore', 'pipe', 'pipe'] });
+    t.after(() => child.kill());
+    let output = ''; child.stdout.on('data', chunk => { output += chunk; }); child.stderr.on('data', chunk => { output += chunk; });
+    return { child, exit: new Promise(resolve => child.on('exit', code => resolve({ code, output }))) };
+  };
+  const expected = createHash('sha256').update(new Uint8Array(32 * 1024 * 1024).fill(71)).digest('hex');
+  const hash = async name => createHash('sha256').update(await readFile(join(destination, name))).digest('hex');
+  assert.equal((await run().exit).code, 0);
+  const again = await run().exit;
+  assert.equal(again.code, 0, again.output);
+  assert.equal(await hash('2-one.bin'), expected, 'A second run keeps the first file and saves beside it');
+  // Interrupt a run once its partial file has data, then run again.
+  const interrupted = run();
+  for (let attempt = 0; attempt < 500; attempt++) {
+    const partial = (await readdir(destination)).find(name => name.endsWith('.partial'));
+    if (partial && (await stat(join(destination, partial))).size > 0) break;
+    await delay(5);
+  }
+  interrupted.child.kill('SIGKILL'); await interrupted.exit;
+  assert.ok((await readdir(destination)).some(name => name.endsWith('.partial')), 'The interrupted run left its partial file');
+  const resumed = await run().exit;
+  assert.equal(resumed.code, 0, resumed.output);
+  assert.equal(await hash('3-one.bin'), expected);
+  assert.deepEqual((await readdir(destination)).sort(), ['2-one.bin', '3-one.bin', 'one.bin']);
 });
 
 test('Node receiver stays connected while a queued addition is still being hashed', { timeout: 20000 }, async t => {
