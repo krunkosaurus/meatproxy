@@ -7,21 +7,23 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { connect as connectTCP } from 'node:net';
+import { randomBytes } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import WebSocket from 'ws';
 import { createApp, fingerprint, securityHeaders } from '../server.mjs';
 import { makeSecret, importSecret, encrypt, decrypt, validateManifest } from '../public/protocol.js';
 
-async function setup(t) {
-  const app = createApp({ origin: 'https://meatproxy.to' });
+async function setup(t, options = {}) {
+  const app = createApp({ origin: 'https://meatproxy.to', ...options });
   app.server.listen(0, '127.0.0.1'); await once(app.server, 'listening');
   t.after(() => app.close());
   const url = `ws://127.0.0.1:${app.server.address().port}/socket`;
-  const connect = async () => { const ws = new WebSocket(url, { origin: 'https://meatproxy.to' }); await once(ws, 'open'); return ws; };
+  // In production, Nginx sets X-Real-IP to the client's address.
+  const connect = async address => { const ws = new WebSocket(url, { origin: 'https://meatproxy.to', headers: address ? { 'X-Real-IP': address } : {} }); await once(ws, 'open'); return ws; };
   return { app, connect, url };
 }
 const message = async ws => JSON.parse((await once(ws, 'message'))[0].toString());
-async function create(connect) { const owner = await connect(); const response = message(owner); owner.send(JSON.stringify({ type: 'create' })); return { owner, room: (await response).room }; }
+async function create(connect, address) { const owner = await connect(address); const response = message(owner); owner.send(JSON.stringify({ type: 'create' })); return { owner, room: (await response).room }; }
 async function publish(owner, preview) {
   const processed = once(owner, 'pong');
   owner.send(JSON.stringify({ type: 'preview', ...preview })); owner.ping(); await processed;
@@ -417,6 +419,249 @@ test('the liveness check drops a stalled receiver but keeps the sender the relay
   assert.equal((await left).type, 'peer-left');
   await publish(owner, { count: 0, totalBytes: 0, names: [] });
   assert.equal(owner.readyState, WebSocket.OPEN);
+});
+
+// The page enforces the handoff limits; these limits stop a modified client using the relay as an open pipe.
+const nextJSON = ws => new Promise(resolve => ws.on('message', function listener(data, binary) { if (!binary) { ws.off('message', listener); resolve(JSON.parse(data)); } }));
+const closeOf = async ws => { const [code, reason] = await once(ws, 'close'); return `${code} ${reason}`; };
+async function joinRelay(connect, owner, room, address) {
+  const receiver = await connect(address); const joined = message(receiver); const ownerJoined = message(owner);
+  receiver.send(JSON.stringify({ type: 'join', room }));
+  assert.equal((await joined).type, 'joined'); assert.equal((await ownerJoined).type, 'peer-joined');
+  const signalled = message(receiver); owner.send(JSON.stringify({ type: 'signal', payload: 'relay' })); await signalled;
+  return receiver;
+}
+async function limitedPair(connect, receiverAddress) {
+  const { owner, room } = await create(connect);
+  return { owner, room, receiver: await joinRelay(connect, owner, room, receiverAddress) };
+}
+// The receiver's first relay frame ("ready") starts the session: 'admitted', or the refusal's close.
+function startRelay({ owner, receiver }) {
+  const outcome = new Promise(resolve => {
+    owner.on('message', (data, binary) => { if (binary) resolve('admitted'); });
+    receiver.once('close', (code, reason) => resolve(`${code} ${reason}`));
+  });
+  receiver.send(Buffer.from('ready'));
+  return outcome;
+}
+
+test('one receiver connection relays at most one handoff and acknowledgement-sized traffic back; the other side learns why', { timeout: 10000 }, async t => {
+  const { connect } = await setup(t, { limits: { toReceiver: 100_000, toSender: 1_000 } });
+  const forward = await limitedPair(connect);
+  let received = 0; forward.receiver.on('message', (data, binary) => { if (binary) received += data.length; });
+  const senderClosed = closeOf(forward.owner), told = nextJSON(forward.receiver);
+  for (const size of [60_000, 40_000, 1]) forward.owner.send(Buffer.alloc(size));
+  assert.equal(await senderClosed, '4001 Relay limit reached for this handoff');
+  assert.deepEqual(await told, { type: 'sender-left', code: 4001, reason: 'Relay limit reached for this handoff' });
+  assert.equal(received, 100_000);
+  const back = await limitedPair(connect);
+  const receiverClosed = closeOf(back.receiver), ownerTold = nextJSON(back.owner);
+  for (const size of [600, 400, 1]) back.receiver.send(Buffer.alloc(size));
+  assert.equal(await receiverClosed, '4001 Relay limit reached for this handoff');
+  assert.deepEqual(await ownerTold, { type: 'peer-left', code: 4001, reason: 'Relay limit reached for this handoff' });
+});
+
+test('a relay session reserves its allowance a slice at a time, and a spent allowance stops only that receiver', { timeout: 10000 }, async t => {
+  const { connect } = await setup(t, { limits: { slice: 100_000, addressDaily: 460_000 } });
+  const pairs = [];
+  for (let i = 0; i < 4; i++) { // Each idle session holds one slice.
+    const pair = await limitedPair(connect, '203.0.113.7');
+    assert.equal(await startRelay(pair), 'admitted'); pairs.push(pair);
+  }
+  const network = '4003 This network has used its relay allowance for now; try again later';
+  assert.equal(await startRelay(await limitedPair(connect, '203.0.113.7')), network);
+  const [grow] = pairs;
+  let received = 0; grow.receiver.on('message', (data, binary) => { if (binary) received += data.length; });
+  const refused = closeOf(grow.receiver), told = nextJSON(grow.owner);
+  grow.owner.send(Buffer.alloc(50_000)); grow.owner.send(Buffer.alloc(50_000)); // The second needs another slice.
+  assert.equal(await refused, network);
+  assert.deepEqual(await told, { type: 'peer-left', code: 4003, reason: network.slice(5) });
+  assert.equal(received, 50_000, 'Everything within the reserved slice arrived');
+  assert.equal(grow.owner.readyState, WebSocket.OPEN, 'The link survives for another recipient');
+  assert.equal(await startRelay(await limitedPair(connect, '203.0.113.7')), 'admitted', 'The unused part of its slice returned');
+});
+
+test('signals count their bytes on the wire, per receiver connection', { timeout: 10000 }, async t => {
+  const { connect } = await setup(t, { limits: { signals: 10_000 } });
+  const { receiver } = await limitedPair(connect);
+  // One character each, but six bytes once escaped in the JSON frame: about 6 KB per message.
+  const escaped = JSON.stringify({ type: 'signal', payload: '\u0001'.repeat(1_000) });
+  const closed = closeOf(receiver);
+  receiver.send(escaped); receiver.send(escaped);
+  assert.equal(await closed, '4001 Connection setup limit reached');
+});
+
+test('reconnecting cannot turn signals into a pipe: they have a daily allowance per address and per network', { timeout: 10000 }, async t => {
+  const { connect } = await setup(t, { limits: { signals: 10_000, addressSignals: 20_000, networkSignals: 40_000 } });
+  const signal = JSON.stringify({ type: 'signal', payload: 'x'.repeat(5_970) }); // About 6 KB per receiver connection.
+  const accepted = async address => {
+    const { owner, receiver } = await limitedPair(connect, address);
+    const forwarded = message(owner); receiver.send(signal);
+    assert.equal((await forwarded).type, 'signal', `${address} is within the allowance`);
+  };
+  const refused = async address => {
+    const { receiver } = await limitedPair(connect, address);
+    const closed = closeOf(receiver); receiver.send(signal);
+    assert.equal(await closed, "4006 This network has used today's connection setup allowance; try again after 00:00 UTC", address);
+  };
+  for (let session = 0; session < 3; session++) await accepted('203.0.113.5');
+  await refused('203.0.113.5');
+  // One address cannot spend its network's allowance, so a neighbour can still connect,
+  for (let session = 0; session < 3; session++) await accepted('203.0.113.6');
+  await refused('203.0.113.7'); // but rotating addresses stops at the network's.
+  await accepted('198.51.100.1');
+  // An IPv6 customer's /56 holds 256 /64s; together they get one address's allowance.
+  for (const address of ['2001:db8:d0:100::1', '2001:db8:d0:100::2', '2001:db8:d0:1ff::1']) await accepted(address);
+  await refused('2001:db8:d0:1aa::1');
+  await accepted('2001:db8:d0:200::1'); // Another customer in the same /48.
+});
+
+test("a spent relay allowance, an address's or everyone's, never blocks setting up a direct connection", { timeout: 10000 }, async t => {
+  const { connect } = await setup(t, { limits: { slice: 50_000, addressDaily: 50_000, daily: 100_000 } });
+  const signalsFlow = async ({ owner, receiver }) => {
+    const hello = message(owner); receiver.send(JSON.stringify({ type: 'signal', payload: 'h'.repeat(1_100) }));
+    assert.equal((await hello).type, 'signal');
+    const offer = message(receiver); owner.send(JSON.stringify({ type: 'signal', payload: 'o'.repeat(1_100) }));
+    assert.equal((await offer).type, 'signal');
+  };
+  assert.equal(await startRelay(await limitedPair(connect, '203.0.113.1')), 'admitted'); // 203.0.113.1's whole allowance.
+  const own = await limitedPair(connect, '203.0.113.1');
+  await signalsFlow(own);
+  assert.equal(await startRelay(own), '4003 This network has used its relay allowance for now; try again later');
+  assert.equal(await startRelay(await limitedPair(connect, '192.0.2.1')), 'admitted'); // The rest of the day's.
+  const everyone = await limitedPair(connect, '198.51.100.1');
+  await signalsFlow(everyone);
+  assert.equal(await startRelay(everyone), "4004 The relay has reached today's limit; try again after 00:00 UTC");
+  assert.equal(everyone.owner.readyState, WebSocket.OPEN);
+});
+
+test('a handoff the remaining allowance cannot carry is refused at the start, not partway', { timeout: 10000 }, async t => {
+  const { connect } = await setup(t, { limits: { slice: 10_000, room: 100_000 } });
+  const { owner, room } = await create(connect);
+  await publish(owner, { count: 1, totalBytes: 60_000, names: [] });
+  const first = await joinRelay(connect, owner, room);
+  let received = 0; first.on('message', (data, binary) => { if (binary) received += data.length; });
+  assert.equal(await startRelay({ owner, receiver: first }), 'admitted');
+  for (let i = 0; i < 6; i++) owner.send(Buffer.alloc(10_000));
+  await until(() => received === 60_000, 'the first delivery');
+  const left = nextJSON(owner); first.close(); await left; // The link has relayed 60,005 of its 100,000.
+  const second = await joinRelay(connect, owner, room);
+  assert.equal(await startRelay({ owner, receiver: second }), '4002 This link has used its relay allowance; ask the sender for a fresh link');
+});
+
+test('the start check counts whole slices, so a handoff is not admitted only to stop in its last slice', { timeout: 10000 }, async t => {
+  const link = '4002 This link has used its relay allowance; ask the sender for a fresh link';
+  const network = '4003 This network has used its relay allowance for now; try again later';
+  for (const [limits, address, refusal] of [[{ room: 65_000 }, undefined, link], [{ addressDaily: 65_000 }, '203.0.113.7', network]]) {
+    const { connect } = await setup(t, { limits: { slice: 10_000, ...limits } });
+    const { owner, room } = await create(connect);
+    await publish(owner, { count: 1, totalBytes: 60_000, names: [] }); // Fits 65,000, but its seventh slice would not.
+    const receiver = await joinRelay(connect, owner, room, address);
+    assert.equal(await startRelay({ owner, receiver }), refusal);
+  }
+});
+
+test('daily allowances are checked when a relay session starts, reserve its worst case, and refund the rest', { timeout: 15000 }, async t => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.UTC(2026, 9, 31, 12) });
+  // Each session reserves one 50,000-byte slice when it starts.
+  const { connect } = await setup(t, { limits: { slice: 50_000, addressDaily: 100_000, networkDaily: 150_000, daily: 260_000 } });
+  const session = async address => { const pair = await limitedPair(connect, address); return { pair, outcome: await startRelay(pair) }; };
+  const own = '4003 This network has used its relay allowance for now; try again later', everyone = "4004 The relay has reached today's limit; try again after 00:00 UTC";
+  const first = await session('203.0.113.1');
+  assert.equal(first.outcome, 'admitted');
+  // An admitted session may use everything it reserved, even as others fill the day's allowance.
+  let received = 0; first.pair.receiver.on('message', (data, binary) => { if (binary) received += data.length; });
+  assert.equal((await session('203.0.113.1')).outcome, 'admitted');
+  const refused = await limitedPair(connect, '203.0.113.1'), told = nextJSON(refused.owner);
+  assert.equal(await startRelay(refused), own, 'A third session for one address');
+  assert.deepEqual(await told, { type: 'peer-left', code: 4003, reason: own.slice(5) });
+  assert.equal((await session('203.0.113.2')).outcome, 'admitted');
+  assert.equal((await session('203.0.113.3')).outcome, own, 'A fourth session for one /24');
+  assert.equal((await session('192.0.2.1')).outcome, 'admitted');
+  const idle = await session('192.0.2.2');
+  assert.equal(idle.outcome, 'admitted');
+  assert.equal((await session('192.0.2.3')).outcome, everyone);
+  first.pair.owner.send(Buffer.alloc(40_000));
+  await until(() => received === 40_000, 'the whole reservation of the first session');
+  idle.pair.receiver.close(); await nextJSON(idle.pair.owner); // It carried 5 bytes of its 50,000.
+  assert.equal((await session('192.0.2.3')).outcome, 'admitted');
+  t.mock.timers.tick(12 * 60 * 60 * 1000); // The next UTC day starts with fresh allowances.
+  assert.equal((await session('203.0.113.1')).outcome, 'admitted');
+});
+
+test("a session reserved yesterday returns nothing to today's allowance", { timeout: 10000 }, async t => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.UTC(2026, 9, 31, 23, 59) });
+  const { connect } = await setup(t, { limits: { slice: 50_000, daily: 120_000 } });
+  const late = await limitedPair(connect);
+  assert.equal(await startRelay(late), 'admitted');
+  t.mock.timers.tick(6 * 60 * 1000); // 00:05 UTC, before anything else is relayed today.
+  late.receiver.close(); await nextJSON(late.owner);
+  for (let i = 0; i < 2; i++) assert.equal(await startRelay(await limitedPair(connect)), 'admitted');
+  assert.equal(await startRelay(await limitedPair(connect)), "4004 The relay has reached today's limit; try again after 00:00 UTC");
+});
+
+test('a slice taken after midnight returns its unused part to the new day', { timeout: 10000 }, async t => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.UTC(2026, 9, 31, 23, 59) });
+  const { connect } = await setup(t, { limits: { slice: 50_000, daily: 120_000 } });
+  const crossing = await limitedPair(connect);
+  let received = 0; crossing.receiver.on('message', (data, binary) => { if (binary) received += data.length; });
+  assert.equal(await startRelay(crossing), 'admitted'); // A slice from yesterday.
+  crossing.owner.send(Buffer.alloc(40_000)); await until(() => received === 40_000, 'data before midnight');
+  t.mock.timers.tick(6 * 60 * 1000);
+  crossing.owner.send(Buffer.alloc(20_000)); await until(() => received === 60_000, 'data after midnight'); // A slice from today.
+  crossing.receiver.close(); await nextJSON(crossing.owner); // Today keeps only the 10,005 bytes it carried.
+  for (let i = 0; i < 2; i++) assert.equal(await startRelay(await limitedPair(connect)), 'admitted');
+  assert.equal(await startRelay(await limitedPair(connect)), "4004 The relay has reached today's limit; try again after 00:00 UTC");
+});
+
+test('a link has a relay allowance across its receivers', { timeout: 10000 }, async t => {
+  const { connect } = await setup(t, { limits: { slice: 50_000, room: 120_000 } });
+  const { owner, room } = await create(connect);
+  for (let used = 0; used < 2; used++) {
+    const receiver = await joinRelay(connect, owner, room);
+    assert.equal(await startRelay({ owner, receiver }), 'admitted');
+    owner.send(Buffer.alloc(40_000)); await once(receiver, 'message');
+    const left = nextJSON(owner); receiver.close(); await left;
+  }
+  const receiver = await joinRelay(connect, owner, room);
+  assert.equal(await startRelay({ owner, receiver }), '4002 This link has used its relay allowance; ask the sender for a fresh link');
+});
+
+// A raw upgrade never answers the close frame, so a refused socket stays open until the relay terminates it.
+const rawUpgrade = (t, app, address) => new Promise(resolve => {
+  const socket = connectTCP(app.server.address().port, '127.0.0.1');
+  socket.once('data', chunk => resolve(Number(chunk.toString().split(' ')[1])));
+  socket.write(`GET /socket HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: ${randomBytes(16).toString('base64')}\r\nSec-WebSocket-Version: 13\r\nX-Real-IP: ${address}\r\n\r\n`);
+  t.after(() => socket.destroy());
+});
+
+test("sockets opened only to be refused take none of the service's slots, and their pool is small", { timeout: 10000 }, async t => {
+  const { app, connect } = await setup(t, { maxClients: 3, maxConnections: { address: 1, network: 10 }, maxRefusing: 1 });
+  await connect('198.51.100.1'); await connect('198.51.100.2'); // Two of three slots.
+  assert.equal(await rawUpgrade(t, app, '198.51.100.1'), 101); // Opened to be refused, and lingering.
+  assert.equal(await rawUpgrade(t, app, '198.51.100.2'), 429, 'The pool of sockets being refused is full');
+  const third = await connect('198.51.100.3');
+  assert.equal(third.readyState, WebSocket.OPEN, 'The lingering refusal does not hold the last slot');
+});
+
+test('behind a proxy, extra connections from one address or network are closed with a reason, then refused', { timeout: 10000 }, async t => {
+  const { app, connect } = await setup(t, { maxConnections: { address: 2, network: 3 } });
+  const upgrade = address => rawUpgrade(t, app, address);
+  await connect('2001:db8:1:2::1'); await connect('2001:db8:1:5:abcd::5'); // One /56, a customer's.
+  const told = await connect('2001:db8:1:ff::1');
+  assert.equal(await closeOf(told), '4005 Too many connections from this network; close Meatproxy tabs you no longer need, or try again later');
+  assert.equal(await upgrade('2001:db8:1:2::77'), 101); // Accepted only to be closed...
+  assert.equal(await upgrade('2001:db8:1:2::78'), 101);
+  assert.equal(await upgrade('2001:db8:1:2::79'), 429); // ...and beyond twice the limit, refused outright.
+  const kept = async address => {
+    const ws = await connect(address); ws.send(JSON.stringify({ type: 'create' }));
+    return Promise.race([message(ws).then(msg => msg.type), closeOf(ws)]);
+  };
+  assert.equal(await kept('2001:db8:1:300::1'), 'created', 'Refused sockets count only toward their own address, so the rest of the /48 can still connect');
+  assert.equal(await kept('2001:db8:1:400::1'), '4005 Too many connections from this network; close Meatproxy tabs you no longer need, or try again later', 'The /48 is full');
+  await connect('198.51.100.7'); await connect('::ffff:198.51.100.7');
+  assert.match(await closeOf(await connect('198.51.100.7')), /^4005 /);
+  for (let i = 0; i < 5; i++) await connect(); // Without X-Real-IP (no proxy), there are no per-address limits.
 });
 
 test('cross-origin sockets are refused and malformed messages do not crash the server', async t => {

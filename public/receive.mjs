@@ -76,7 +76,8 @@ async function sendClientControl(value) {
 }
 clientSocket.onopen = () => { resetIdle(); clientSocket.send(JSON.stringify({ type: 'join', room: roomID })); };
 clientSocket.onerror = () => stop(new Error('Could not connect to Meatproxy.'));
-clientSocket.onclose = () => { if (!successful && !stopped) stop(new Error('The sender disconnected before the handoff finished.')); };
+// Handle messages that arrived before the close first, such as why the sender left.
+clientSocket.onclose = event => { queue = queue.then(() => { if (!successful && !stopped) stop(new Error(event.reason ? `Meatproxy closed the connection: ${event.reason}.` : 'The sender disconnected before the handoff finished.')); }); };
 clientSocket.onmessage = event => {
   resetIdle();
   queue = queue.then(async () => {
@@ -92,7 +93,7 @@ clientSocket.onmessage = event => {
         if (control.type === 'relay' && control.session === sessionID) await sendClientControl({ type: 'ready' });
       } else if (msg.type === 'unavailable') throw new Error('The sender is offline or the link has expired.');
       else if (msg.type === 'busy') throw new Error('Another recipient is connected. Ask them to close their receiving tab.');
-      else if (msg.type === 'sender-left') throw new Error('The sender closed their tab.');
+      else if (msg.type === 'sender-left') throw new Error(msg.reason ? `The relay closed the sender's connection: ${msg.reason}.` : 'The sender closed their tab.');
       return;
     }
     const plain = await decrypt(transferKey, event.data, `data:${roomID}:${sessionID}:sender`);
@@ -117,13 +118,20 @@ clientSocket.onmessage = event => {
       let filename = safe; let n = 2;
       while ([...completed.values()].some(file => file.name === filename)) filename = `${n++}-${safe}`;
       const partial = join(outputDir, `.meatproxy-${meta.id}.partial`);
-      currentFile = { meta, name: filename, partial, handle: await open(partial, 'wx', 0o600), hash: createHash('sha256'), offset: 0 };
+      // An interrupted earlier run of this handoff can leave this file's partial behind.
+      const handle = await open(partial, 'wx', 0o600).catch(async error => { if (error.code !== 'EEXIST') throw error; await unlink(partial); return open(partial, 'wx', 0o600); });
+      currentFile = { meta, safe, name: filename, partial, handle, hash: createHash('sha256'), offset: 0 };
     } else if (control.type === 'end') {
       const file = currentFile;
       if (!file || file.meta.id !== control.id || file.offset !== file.meta.size || file.hash.digest('hex') !== file.meta.sha256) throw new Error('File integrity verification failed.');
       await file.handle.close();
-      // A hard link publishes a verified file atomically and refuses to overwrite existing files.
-      await linkFile(file.partial, join(outputDir, file.name)); await unlink(file.partial);
+      // A hard link publishes a verified file atomically and refuses to overwrite existing files,
+      // including those from an earlier run into the same folder.
+      for (let n = 2; ; n++) {
+        try { await linkFile(file.partial, join(outputDir, file.name)); break; }
+        catch (error) { if (error.code !== 'EEXIST') throw error; file.name = `${n}-${file.safe}`; }
+      }
+      await unlink(file.partial);
       completed.set(file.meta.id, { name: file.name, bytes: file.offset, sha256: file.meta.sha256 }); currentFile = null;
       console.log(`Verified: ${file.name} (${file.offset} bytes)`);
       await sendClientControl({ type: 'received', id: file.meta.id });

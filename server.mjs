@@ -62,6 +62,48 @@ const roomLifetime = 12 * 60 * 60 * 1000;
 // Above either limit, the relay stops reading from a sender until its receiver catches up.
 // Each queued message costs heap however small it is, so messages are counted as well as bytes.
 const relayBufferBytes = 512 * 1024, relayBufferMessages = 256;
+// The page enforces the handoff limits; the relay enforces them too, so a modified client cannot use
+// it as an open pipe. Relayed bytes are charged to the receiving side's address and network.
+// Daily counts reset at midnight UTC and when the service restarts.
+const relayLimits = {
+  toReceiver: MAX_BYTES + 64 * 1024 * 1024, // Per receiver connection: one handoff plus encryption and control.
+  toSender: 8 * 1024 * 1024, // Per receiver connection: acknowledgements and control messages.
+  slice: 64 * 1024 * 1024, // Reserved from the allowances at a time as a session relays.
+  signals: 32 * 1024, // Per receiver connection and direction: setup takes about 5-15 KB.
+  // Sent per day. Separate from the relay allowances, so a spent relay allowance never blocks direct
+  // setup. These bound what rejoining from rotating addresses can carry, and a network's allowance is
+  // 64 addresses' worth, so one neighbour cannot spend it.
+  addressSignals: 16 * 1024 * 1024,
+  networkSignals: 1024 ** 3,
+  room: 4 * 1024 ** 3, // Per link, over its 12-hour life.
+  addressDaily: 4 * 1024 ** 3,
+  networkDaily: 16 * 1024 ** 3,
+  daily: 50 * 1024 ** 3,
+};
+// A network may hold four addresses' worth, so one neighbour cannot fill it, and filling the
+// 200-socket cap takes seven networks.
+const connectionLimits = { address: 8, network: 32 };
+// Pages word these close codes for their reader; the reasons are for the command-line receiver.
+const refusals = {
+  handoff: [4001, 'Relay limit reached for this handoff'],
+  signals: [4001, 'Connection setup limit reached'],
+  link: [4002, 'This link has used its relay allowance; ask the sender for a fresh link'],
+  network: [4003, 'This network has used its relay allowance for now; try again later'],
+  relay: [4004, "The relay has reached today's limit; try again after 00:00 UTC"],
+  connections: [4005, 'Too many connections from this network; close Meatproxy tabs you no longer need, or try again later'],
+  setup: [4006, "This network has used today's connection setup allowance; try again after 00:00 UTC"],
+};
+// One customer typically holds an IPv4 address or an IPv6 /56 (ISPs commonly delegate 256 /64s to a
+// household), and one provider network an IPv4 /24 or an IPv6 /48, so limits count those as one
+// address and one network.
+function addressKeys(address) {
+  const v4 = address.match(/^(?:::ffff:)?(\d+)\.(\d+)\.(\d+)\.(\d+)$/i);
+  if (v4) return { address: v4.slice(1).join('.'), network: `${v4.slice(1, 4).join('.')}.0/24` };
+  const [head, tail = ''] = address.split('::');
+  const left = head ? head.split(':') : [], right = tail ? tail.split(':') : [];
+  const groups = [...left, ...Array(Math.max(0, 8 - left.length - right.length)).fill('0'), ...right].map(group => parseInt(group, 16).toString(16));
+  return { address: `${groups.slice(0, 3).join(':')}:${(parseInt(groups[3], 16) & 0xff00).toString(16)}::/56`, network: `${groups.slice(0, 3).join(':')}::/48` };
+}
 const escapeHTML = value => value.replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
 
 function previewOf(room) {
@@ -89,8 +131,67 @@ function renderPreview(html, preview, url) {
     .replace(/(<meta (?:name|property)="([^"]+)" content=")[^"]*(")/g, (tag, start, name, end) => name in values ? start + escapeHTML(values[name]) + end : tag);
 }
 
-export function createApp({ origin = process.env.PUBLIC_ORIGIN, maxClients = 200 } = {}) {
+export function createApp({ origin = process.env.PUBLIC_ORIGIN, maxClients = 200, maxConnections = connectionLimits, maxRefusing = 20, limits = {} } = {}) {
   const rooms = new Map();
+  let refusing = 0;
+  const limit = { ...relayLimits, ...limits };
+  const connections = new Map(), usage = { day: -1, total: 0, byKey: new Map(), signals: new Map() };
+  const count = (map, key, change) => { const next = (map.get(key) || 0) + change; if (next > 0) map.set(key, next); else map.delete(key); };
+  const today = () => {
+    const day = Math.floor(Date.now() / 86_400_000);
+    if (usage.day !== day) Object.assign(usage, { day, total: 0, byKey: new Map(), signals: new Map() });
+    return day;
+  };
+  const keysOf = keys => keys ? [keys.address, keys.network] : [];
+  // Why today's relay allowances for an address and its network (none without a proxy) cannot take these bytes.
+  const short = (keys, bytes) => {
+    today();
+    const used = key => usage.byKey.get(key) || 0;
+    if (keys && (used(keys.address) + bytes > limit.addressDaily || used(keys.network) + bytes > limit.networkDaily)) return refusals.network;
+    if (usage.total + bytes > limit.daily) return refusals.relay;
+  };
+  const spend = (keys, bytes) => {
+    const refusal = bytes > 0 && short(keys, bytes);
+    if (refusal) return refusal;
+    usage.total += bytes;
+    for (const key of keysOf(keys)) count(usage.byKey, key, bytes);
+  };
+  // A relay session reserves its allowance a slice at a time as it relays, so an idle session holds
+  // little. A handoff the remaining allowances cannot carry is refused at the start rather than partway;
+  // that check reserves nothing, so a sender that understates its handoff only loosens it, and the
+  // slices still stop it. The unused part of the last slice returns when the receiver leaves.
+  const charge = (receiver, bytes) => {
+    if (!receiver.reservation) {
+      const declared = Math.ceil(receiver.room.preview.totalBytes * 1.003); // Plus encryption overhead.
+      const need = Math.ceil(declared / limit.slice) * limit.slice; // Slices are taken whole.
+      if (receiver.room.relayed + need > limit.room) return refusals.link;
+      const refusal = short(receiver.keys, need);
+      if (refusal) return refusal;
+      receiver.reservation = { day: today(), bytes: 0 };
+    }
+    while (receiver.toReceiver + receiver.toSender + bytes > receiver.reservation.bytes) {
+      if (receiver.room.relayed + limit.slice > limit.room) return refusals.link;
+      const refusal = spend(receiver.keys, limit.slice);
+      if (refusal) return refusal;
+      receiver.room.relayed += limit.slice; receiver.reservation.bytes += limit.slice;
+      receiver.reservation.day = usage.day; // Only the latest slice can be partly unused.
+    }
+  };
+  const release = receiver => {
+    if (!receiver.reservation) return;
+    const unused = receiver.reservation.bytes - receiver.toReceiver - receiver.toSender;
+    receiver.room.relayed -= unused;
+    if (receiver.reservation.day === today()) spend(receiver.keys, -unused);
+  };
+  const spendSignals = (keys, bytes) => {
+    today();
+    if (!keys) return;
+    const used = key => usage.signals.get(key) || 0;
+    if (used(keys.address) + bytes > limit.addressSignals || used(keys.network) + bytes > limit.networkSignals) return refusals.setup;
+    for (const key of keysOf(keys)) count(usage.signals, key, bytes);
+  };
+  // The other peer learns why from sender-left or peer-left.
+  const closeWith = (ws, [code, reason]) => { ws.closeCode = code; ws.closeReason = reason; ws.close(code, reason); };
   // Socket origins are compared to this exact string, so accept only a bare http(s) origin.
   const publicOrigin = new URL(origin || 'https://meatproxy.to');
   if (!/^https?:$/.test(publicOrigin.protocol) || (origin && publicOrigin.origin !== origin)) throw new Error(`PUBLIC_ORIGIN must be an origin such as https://meatproxy.to, not ${origin}`);
@@ -130,13 +231,32 @@ export function createApp({ origin = process.env.PUBLIC_ORIGIN, maxClients = 200
     const requestOrigin = req.headers.origin;
     const allowedOrigin = origin || `http://${req.headers.host}`;
     // Browsers supply Origin; the downloadable Node client has no ambient cookies and no Origin.
-    if (req.url !== '/socket' || (requestOrigin && requestOrigin !== allowedOrigin) || wss.clients.size >= maxClients) {
+    // Sockets opened only to be refused do not take one of the service's slots.
+    if (req.url !== '/socket' || (requestOrigin && requestOrigin !== allowedOrigin) || wss.clients.size - refusing >= maxClients) {
       socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n'); return;
     }
-    wss.handleUpgrade(req, socket, head, ws => wss.emit('connection', ws));
+    // Nginx sets X-Real-IP to the client's address. Without a proxy (local development), no per-address limits apply.
+    const keys = req.headers['x-real-ip'] ? addressKeys(req.headers['x-real-ip']) : null;
+    const held = key => connections.get(key) || 0;
+    const refused = keys && (held(keys.address) >= maxConnections.address || held(keys.network) >= maxConnections.network);
+    // A few extra sockets open only to be closed with a reason the page can show; beyond that, 429.
+    if ((keys && held(keys.address) >= 2 * maxConnections.address) || (refused && refusing >= maxRefusing)) { socket.end('HTTP/1.1 429 Too Many Requests\r\nConnection: close\r\n\r\n'); return; }
+    // Counted from the handshake until the socket closes, so refused or lingering sockets cannot pile up.
+    // Refused sockets count only toward their own address, so they cannot fill the network for its neighbours.
+    const counted = !keys ? [] : refused ? [keys.address] : [keys.address, keys.network];
+    for (const key of counted) count(connections, key, 1);
+    socket.once('close', () => { for (const key of counted) count(connections, key, -1); });
+    if (refused) { refusing++; socket.once('close', () => { refusing--; }); }
+    wss.handleUpgrade(req, socket, head, ws => {
+      ws.keys = keys;
+      if (!refused) { wss.emit('connection', ws); return; }
+      ws.on('error', () => {}); closeWith(ws, refusals.connections);
+      setTimeout(() => ws.terminate(), 2000).unref();
+    });
   });
   wss.on('connection', ws => {
     ws.alive = true; ws.held = false; ws.relayQueue = 0;
+    ws.toReceiver = 0; ws.toSender = 0; ws.signalsToReceiver = 0; ws.signalsToSender = 0;
     ws.on('pong', () => { ws.alive = true; });
     const setupTimer = setTimeout(() => { if (!ws.room) ws.close(1008, 'Join a handoff first'); }, 10_000);
     ws.on('error', () => {}); // Errors are followed by close; close performs room cleanup.
@@ -147,6 +267,11 @@ export function createApp({ origin = process.env.PUBLIC_ORIGIN, maxClients = 200
         // After a receiver leaves, the sender's queued data for it can still be arriving.
         // The sender's first message for the next receiver is a signal, which follows all of it.
         if (!peer || peer.readyState !== WebSocket.OPEN || (ws.owner && ws.room.previousSession)) return;
+        const receiver = ws.owner ? peer : ws, direction = ws.owner ? 'toReceiver' : 'toSender';
+        if (receiver[direction] + data.length > limit[direction]) { closeWith(ws, refusals.handoff); return; }
+        const refusal = charge(receiver, data.length);
+        if (refusal) { closeWith(receiver, refusal); return; } // The link survives for another recipient.
+        receiver[direction] += data.length;
         // Pausing lets TCP slow the sender's browser. Write callbacks also fire, with an
         // error, when the receiver's socket is destroyed, so a departed receiver releases it.
         const backlogged = () => peer.bufferedAmount > relayBufferBytes || peer.relayQueue > relayBufferMessages;
@@ -160,7 +285,7 @@ export function createApp({ origin = process.env.PUBLIC_ORIGIN, maxClients = 200
       if (!msg || typeof msg !== 'object') { ws.close(1008, 'Invalid message'); return; }
       if (msg.type === 'create' && !ws.room) {
         const id = randomBytes(16).toString('base64url');
-        const room = { id, owner: ws, guest: null, created: Date.now(), preview: { count: 0, totalBytes: 0, names: [] } };
+        const room = { id, owner: ws, guest: null, created: Date.now(), relayed: 0, preview: { count: 0, totalBytes: 0, names: [] } };
         rooms.set(id, room); ws.room = room; ws.owner = true;
         clearTimeout(setupTimer); send(ws, { type: 'created', room: id });
       } else if (msg.type === 'join' && !ws.room && tokenPattern.test(msg.room)) {
@@ -177,6 +302,14 @@ export function createApp({ origin = process.env.PUBLIC_ORIGIN, maxClients = 200
         ws.room.preview = { count: msg.count, totalBytes: msg.totalBytes, names: msg.names.map(name => name.replace(/[\x00-\x1f\x7f]/g, '').slice(0, 180)) };
       } else if (msg.type === 'signal' && ws.room && typeof msg.payload === 'string' && msg.payload.length <= 60_000) {
         const peer = ws.owner ? ws.room.guest : ws.room.owner;
+        const receiver = ws.owner ? peer : ws, direction = ws.owner ? 'signalsToReceiver' : 'signalsToSender';
+        // Frame bytes, so escaped characters count at their size on the wire.
+        if (receiver) {
+          if (receiver[direction] + data.length > limit.signals) { closeWith(ws, refusals.signals); return; }
+          const refusal = spendSignals(ws.keys, data.length);
+          if (refusal) { closeWith(ws, refusal); return; }
+          receiver[direction] += data.length;
+        }
         // Relies on the sender sending no signals after its first relay data in a session (app.js setupRTC).
         if (ws.owner) ws.room.previousSession = false;
         send(peer, { type: 'signal', payload: msg.payload });
@@ -190,10 +323,11 @@ export function createApp({ origin = process.env.PUBLIC_ORIGIN, maxClients = 200
       if (!room) return;
       if (ws.owner) {
         rooms.delete(room.id);
-        send(room.guest, { type: 'sender-left' });
+        send(room.guest, { type: 'sender-left', code: ws.closeCode, reason: ws.closeReason });
         room.guest?.close(1000, 'Sender left');
       } else if (room.guest === ws) {
-        room.guest = null; room.previousSession = true; send(room.owner, { type: 'peer-left' });
+        release(ws);
+        room.guest = null; room.previousSession = true; send(room.owner, { type: 'peer-left', code: ws.closeCode, reason: ws.closeReason });
       }
     });
   });

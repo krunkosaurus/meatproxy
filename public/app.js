@@ -19,6 +19,18 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const size = bytes => bytes < 1024 ? `${bytes} B` : bytes < 1024 ** 2 ? `${(bytes / 1024).toFixed(1)} KB` : `${(bytes / 1024 ** 2).toFixed(1)} MB`;
 function status(title, detail, state = '') { $('status').textContent = title; $('status-detail').textContent = detail; $('status-dot').className = `status-dot ${state}`; updateMobileAction(); }
 function notice(message) { $('notice').textContent = message; $('notice').hidden = !message; }
+// The relay closes a connection with these codes when it reaches a limit. own: the reader's connection was closed.
+function relayLimit(code, own) {
+  const other = isSender ? 'The recipient' : 'The sender';
+  return {
+    4001: own ? 'This connection sent more than a handoff allows.' : `${other}'s connection sent more than a handoff allows.`,
+    4002: `This link has used its relay allowance. ${isSender ? 'Start a new handoff to make a fresh link.' : 'Ask the sender for a fresh link.'}`,
+    4003: own ? 'Your network has used its relay allowance for now. Try again later.' : `${other}'s network has used its relay allowance for now.`,
+    4004: isSender && !own ? "The relay has reached today's limit, so this recipient could not connect. Recipients who can connect directly are not affected." : "The relay has reached today's limit. Try again after 00:00 UTC.",
+    4005: 'Too many Meatproxy connections from your network right now. Close Meatproxy tabs you no longer need, or try again later.',
+    4006: own ? "Your network has used today's connection setup allowance. Try again after 00:00 UTC." : `${other}'s network has used today's connection setup allowance.`,
+  }[code];
+}
 function packet(value) { if (ws?.readyState !== WebSocket.OPEN) throw new Error('The connection closed. Start a new handoff.'); ws.send(JSON.stringify(value)); }
 function updateCommand() {
   $('agent-command').textContent = `node meatproxy-receive.mjs '${location.origin}/s/${room}#${secret}' ./handoff`;
@@ -140,7 +152,7 @@ function updateMobileAction() {
 function abortIncoming(p) {
   if (p?.incoming) {
     fileTasks.run('abort', { token: p.incoming.token }).catch(() => {});
-    p.incoming = null;
+    p.incoming.meta.state = 'Interrupted'; p.incoming = null; renderFiles();
   }
 }
 function newPeer() {
@@ -502,24 +514,31 @@ async function connect() {
       else if (msg.type === 'busy') { ended = true; fail(new Error('Someone else is receiving this handoff. Try again after they close their tab.')); }
       else if (msg.type === 'peer-left') {
         if (peer) { peer.closed = true; peer.pc?.close(); clearTimeout(peer.timer); peer.waiters.rejectAll(new Error('The recipient disconnected.')); }
-        status('The recipient has left.', 'Your link is still live. Someone else can open it now.');
+        const limit = relayLimit(msg.code, false);
+        status('The recipient has left.', msg.code === 4002 ? limit : `${limit ? `${limit} ` : ''}Your link is still live. Someone else can open it now.`);
         renderFiles();
       } else if (msg.type === 'sender-left') {
         abortIncoming(peer); clearSilence(peer);
         ended = true; if (peer) { peer.closed = true; peer.pc?.close(); clearTimeout(peer.timer); }
         $('retry').hidden = true; // Reconnecting needs a sender, and would clear received files.
-        status('The sender has left.', received.size ? 'Your received files are still here. Save them before closing this tab.' : 'Ask the sender for a fresh link.');
+        const limit = relayLimit(msg.code, false);
+        status('The sender has left.', `${limit ? `${limit} ` : ''}${received.size ? 'Your received files are still here. Save them before closing this tab.' : 'Ask the sender for a fresh link.'}`);
       }
     }).catch(fail);
   };
   ws.onerror = () => fail(new Error('Could not reach Meatproxy. Check your connection and try again.'));
-  ws.onclose = () => {
+  ws.onclose = event => {
     if (!ended) {
       if (peer?.transport === 'direct' && peer.dc?.readyState === 'open') { notice('The link service disconnected. Your current direct transfer can continue, but new recipients need a fresh link.'); return; }
       if (peer) { peer.progressActive = false; peer.closed = true; }
       abortIncoming(peer); clearSilence(peer);
-      status('Connection closed', isSender ? 'Start a new handoff to make a fresh link.' : 'Save any completed files, then reconnect.', 'error');
-      $('retry').hidden = isSender;
+      // The server explains closes it initiates, such as relay limits.
+      const advice = isSender ? 'Start a new handoff to make a fresh link.' : 'Save any completed files, then reconnect.';
+      const limit = relayLimit(event.code, true), save = !isSender && received.size ? ' Save the files you have received.' : '';
+      status('Connection closed', limit ? limit + save : event.reason ? `${event.reason}. ${advice}` : advice, 'error');
+      // Reconnecting clears received files and cannot lift a relay limit; only a busy network can retry soon.
+      $('retry').hidden = isSender || (limit && event.code !== 4005);
+      updateMobileAction();
     }
   };
 }
