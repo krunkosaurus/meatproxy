@@ -1,7 +1,7 @@
 import http from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { realpathSync } from 'node:fs';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer, WebSocket } from 'ws';
 import { MAX_BYTES, MAX_FILES } from './public/protocol.js';
@@ -24,6 +24,39 @@ const assets = new Map([
   ...['online', 'busy', 'offline'].map(state => [`/og-${state}.png`, [`og-${state}.png`, 'image/png']]),
   ['/receive.mjs', ['receive.mjs', 'text/javascript; charset=utf-8']],
 ]);
+export const securityHeaders = {
+  'X-Content-Type-Options': 'nosniff',
+  'Referrer-Policy': 'no-referrer',
+  'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'",
+  'Permissions-Policy': 'camera=(), microphone=(), geolocation=()',
+};
+// Caches keep headers with the bytes, so the headers are part of every version too.
+const responseHeaders = JSON.stringify([securityHeaders, [...assets]]);
+
+// Every reference to a local asset gets ?v=<content hash>. A file's hash covers its rewritten
+// references, so changing a module also gives new URLs to everything that imports it. Content
+// hashes cannot express a reference cycle, so a cycle fails when the server starts.
+export function fingerprint(sources, headers = responseHeaders) {
+  const built = new Map();
+  const versioned = path => `${path}?v=${build(path).version}`;
+  const references = {
+    html: [/((?:href|src|content)=")((?:https:\/\/meatproxy\.to)?)(\/[\w.-]+)(?:\?v=\w+)?"/g, (match, attribute, host, path) => sources.has(path) ? `${attribute}${host}${versioned(path)}"` : match],
+    js: [/(['"])(\.?)(\/[\w.-]+\.js)\1/g, (match, quote, dot, path) => sources.has(path) ? quote + dot + versioned(path) + quote : match],
+  };
+  function build(path) {
+    if (!built.has(path)) {
+      const rewrite = references[path.split('.').pop()];
+      const body = rewrite ? Buffer.from(sources.get(path).toString().replace(...rewrite)) : sources.get(path);
+      built.set(path, { body, version: createHash('sha256').update(headers).update(body).digest('hex').slice(0, 12) });
+    }
+    return built.get(path);
+  }
+  for (const path of sources.keys()) build(path);
+  return built;
+}
+// Loaded once: each release fingerprints its own files when the service starts.
+const built = fingerprint(new Map(await Promise.all([...assets, ['/index.html', ['index.html']]].map(async ([path, [file]]) => [path, await readFile(new URL(file, publicDir))]))));
+const versioned = path => `${path}?v=${built.get(path).version}`;
 const tokenPattern = /^[A-Za-z0-9_-]{22}$/;
 const roomLifetime = 12 * 60 * 60 * 1000;
 const escapeHTML = value => value.replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
@@ -41,7 +74,7 @@ function renderPreview(html, preview, url) {
   const availability = state === 'online' ? 'Sender online when previewed.' : 'Sender online, sharing with someone else when previewed.';
   const amount = count ? `${count} ${count === 1 ? 'file' : 'files'} · ${Math.ceil(totalBytes / 1024 ** 2)} MB. ` : '';
   const description = state === 'offline' ? 'The sender is offline or this link has expired. Ask them for a fresh link.' : `${availability} ${amount}Open to accept a peer-to-peer transfer. Both of you must stay online.`;
-  const image = new URL(`/og-${state}.png`, url).href;
+  const image = new URL(versioned(`/og-${state}.png`), url).href;
   const alt = state === 'offline' ? 'Meatproxy. This file link has expired. Ask the sender for a fresh link.' : `Meatproxy. Someone has files for you. Open the link. Accept the transfer. ${availability}`;
   const values = {
     description, 'og:url': url, 'og:title': title, 'og:description': description,
@@ -55,13 +88,15 @@ function renderPreview(html, preview, url) {
 
 export function createApp({ origin = process.env.PUBLIC_ORIGIN, maxClients = 200 } = {}) {
   const rooms = new Map();
-  const server = http.createServer(async (req, res) => {
-    const path = new URL(req.url, 'http://localhost').pathname;
-    res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('Referrer-Policy', 'no-referrer');
+  // Socket origins are compared to this exact string, so accept only a bare http(s) origin.
+  const publicOrigin = new URL(origin || 'https://meatproxy.to');
+  if (!/^https?:$/.test(publicOrigin.protocol) || (origin && publicOrigin.origin !== origin)) throw new Error(`PUBLIC_ORIGIN must be an origin such as https://meatproxy.to, not ${origin}`);
+  const server = http.createServer((req, res) => {
+    for (const header of Object.entries(securityHeaders)) res.setHeader(...header);
     res.setHeader('Cache-Control', 'no-store');
-    res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'");
-    res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+    let url;
+    try { url = new URL(req.url, 'http://localhost'); } catch { res.writeHead(400).end(); return; } // For example, GET //[
+    const path = url.pathname;
     if (!['GET', 'HEAD'].includes(req.method)) { res.writeHead(405).end(); return; }
     if (path === '/healthz') { res.setHeader('Content-Type', 'application/json'); res.end('{"ok":true,"version":"0.1.0"}'); return; }
     // Fetching a preview never joins a handoff or receives encrypted file data.
@@ -74,12 +109,12 @@ export function createApp({ origin = process.env.PUBLIC_ORIGIN, maxClients = 200
     }
     const asset = assets.get(path) || (path === '/' || /^\/s\/[A-Za-z0-9_-]{22}$/.test(path) ? ['index.html', 'text/html; charset=utf-8'] : null);
     if (!asset) { res.writeHead(404).end('Not found'); return; }
-    try {
-      let body = await readFile(new URL(asset[0], publicDir));
-      res.setHeader('Content-Type', asset[1]);
-      if (handoff) body = renderPreview(body.toString(), previewOf(rooms.get(handoff[1])), new URL(path, origin || 'https://meatproxy.to').href);
-      res.end(req.method === 'HEAD' ? undefined : body);
-    } catch { res.writeHead(500).end('Unable to load the application'); }
+    let { body, version } = built.get(assets.has(path) ? path : '/index.html');
+    res.setHeader('Content-Type', asset[1]);
+    // A versioned URL names this exact response, so browsers and Cloudflare may keep it.
+    if (assets.has(path) && url.searchParams.get('v') === version) res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    if (handoff) body = renderPreview(body.toString(), previewOf(rooms.get(handoff[1])), new URL(path, publicOrigin).href);
+    res.end(req.method === 'HEAD' ? undefined : body);
   });
   const wss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024, perMessageDeflate: false });
   const send = (socket, value) => {
