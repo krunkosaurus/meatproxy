@@ -148,6 +148,8 @@ function attachChannel(p, channel) {
 }
 function setupRTC(p) {
   p.pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.cloudflare.com:3478' }] });
+  // No signals once relay data may flow: the relay treats the sender's next signal after a
+  // receiver leaves as the end of that receiver's data.
   p.pc.onicecandidate = event => { if (event.candidate && p === peer && !p.closed && p.transport !== 'relay') signal({ type: 'ice', candidate: event.candidate.toJSON() }, p).catch(fail); };
   p.pc.ondatachannel = event => attachChannel(p, event.channel);
   p.pc.onconnectionstatechange = () => { if (p.pc.connectionState === 'failed' && !p.transport && p === peer) requestRelay(p).catch(fail); };

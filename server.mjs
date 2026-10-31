@@ -177,6 +177,7 @@ export function createApp({ origin = process.env.PUBLIC_ORIGIN, maxClients = 200
         ws.room.preview = { count: msg.count, totalBytes: msg.totalBytes, names: msg.names.map(name => name.replace(/[\x00-\x1f\x7f]/g, '').slice(0, 180)) };
       } else if (msg.type === 'signal' && ws.room && typeof msg.payload === 'string' && msg.payload.length <= 60_000) {
         const peer = ws.owner ? ws.room.guest : ws.room.owner;
+        // Relies on the sender sending no signals after its first relay data in a session (app.js setupRTC).
         if (ws.owner) ws.room.previousSession = false;
         send(peer, { type: 'signal', payload: msg.payload });
       } else if (msg.type === 'reject' && ws.owner && ws.room?.guest) {
