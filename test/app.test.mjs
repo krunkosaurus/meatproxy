@@ -95,8 +95,9 @@ test('actual browser relay locks announced files, queues additions before comple
   assert.equal((await receiver.run('snapshot')).mobile.action, 'save');
 });
 
-test('a sender closed by a relay limit is told why', { timeout: 20000 }, async t => {
-  const sender = await page(t, await server(t, { limits: { toReceiver: 300_000 } }));
+test('when a relay limit closes the sender, both pages and the Node receiver say why', { timeout: 20000 }, async t => {
+  const link = await server(t, { limits: { toReceiver: 300_000 } });
+  const sender = await page(t, link);
   await sender.run('add', { files: [{ name: 'payload.bin', size: 1024 * 1024 }] });
   const ready = await sender.until(s => s.rows.length === 1 && s.link.startsWith('http'));
   const receiver = await page(t, ready.link);
@@ -106,6 +107,19 @@ test('a sender closed by a relay limit is told why', { timeout: 20000 }, async t
   for (let attempt = 0; attempt < 300 && snapshot?.status !== 'Connection closed'; attempt++) { await delay(20); snapshot = await sender.run('snapshot'); }
   assert.equal(snapshot.status, 'Connection closed');
   assert.match(snapshot.detail, /^Relay limit reached for this handoff\. Start a new handoff/);
+  const told = await receiver.until(s => s.status === 'The sender has left.');
+  assert.match(told.detail, /^The relay told them: Relay limit reached for this handoff\. Ask the sender/);
+  // The downloadable receiver always uses the relay.
+  const agentSender = await page(t, link);
+  await agentSender.run('add', { files: [{ name: 'payload.bin', size: 1024 * 1024 }] });
+  const agentReady = await agentSender.until(s => s.rows.length === 1 && s.link.startsWith('http'));
+  const destination = await mkdtemp(join(tmpdir(), 'meatproxy-limit-'));
+  t.after(() => rm(destination, { recursive: true, force: true }));
+  const child = spawn(process.execPath, [fileURLToPath(new URL('../public/receive.mjs', import.meta.url)), agentReady.link, destination], { stdio: ['ignore', 'pipe', 'pipe'] });
+  t.after(() => child.kill());
+  let output = ''; child.stdout.on('data', chunk => { output += chunk; }); child.stderr.on('data', chunk => { output += chunk; });
+  assert.equal(await new Promise(resolve => child.on('exit', resolve)), 1);
+  assert.match(output, /The relay closed the sender's connection: Relay limit reached for this handoff\./);
 });
 
 test('Node receiver stays connected while a queued addition is still being hashed', { timeout: 20000 }, async t => {

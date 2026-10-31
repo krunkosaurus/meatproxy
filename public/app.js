@@ -476,12 +476,13 @@ async function connect() {
       else if (msg.type === 'busy') { ended = true; fail(new Error('Someone else is receiving this handoff. Try again after they close their tab.')); }
       else if (msg.type === 'peer-left') {
         if (peer) { peer.closed = true; peer.pc?.close(); clearTimeout(peer.timer); peer.waiters.rejectAll(new Error('The recipient disconnected.')); }
-        status('The recipient has left.', 'Your link is still live. Someone else can open it now.');
+        // The relay names a limit when it closed the other side.
+        status('The recipient has left.', `${msg.reason ? `The relay told them: ${msg.reason}. ` : ''}Your link is still live. Someone else can open it now.`);
         renderFiles();
       } else if (msg.type === 'sender-left') {
         abortIncoming(peer);
         ended = true; if (peer) { peer.closed = true; peer.pc?.close(); clearTimeout(peer.timer); }
-        status('The sender has left.', received.size ? 'Your received files are still here. Save them before closing this tab.' : 'Ask the sender for a fresh link.');
+        status('The sender has left.', `${msg.reason ? `The relay told them: ${msg.reason}. ` : ''}${received.size ? 'Your received files are still here. Save them before closing this tab.' : 'Ask the sender for a fresh link.'}`);
       }
     }).catch(fail);
   };

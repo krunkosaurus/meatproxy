@@ -76,7 +76,7 @@ async function sendClientControl(value) {
 }
 clientSocket.onopen = () => { resetIdle(); clientSocket.send(JSON.stringify({ type: 'join', room: roomID })); };
 clientSocket.onerror = () => stop(new Error('Could not connect to Meatproxy.'));
-clientSocket.onclose = () => { if (!successful && !stopped) stop(new Error('The sender disconnected before the handoff finished.')); };
+clientSocket.onclose = event => { if (!successful && !stopped) stop(new Error(event.reason ? `Meatproxy closed the connection: ${event.reason}.` : 'The sender disconnected before the handoff finished.')); };
 clientSocket.onmessage = event => {
   resetIdle();
   queue = queue.then(async () => {
@@ -92,7 +92,7 @@ clientSocket.onmessage = event => {
         if (control.type === 'relay' && control.session === sessionID) await sendClientControl({ type: 'ready' });
       } else if (msg.type === 'unavailable') throw new Error('The sender is offline or the link has expired.');
       else if (msg.type === 'busy') throw new Error('Another recipient is connected. Ask them to close their receiving tab.');
-      else if (msg.type === 'sender-left') throw new Error('The sender closed their tab.');
+      else if (msg.type === 'sender-left') throw new Error(msg.reason ? `The relay closed the sender's connection: ${msg.reason}.` : 'The sender closed their tab.');
       return;
     }
     const plain = await decrypt(transferKey, event.data, `data:${roomID}:${sessionID}:sender`);
