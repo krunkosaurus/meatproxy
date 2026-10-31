@@ -491,8 +491,8 @@ test('signals count their bytes on the wire, per receiver connection', { timeout
   assert.equal(await closed, '4001 Connection setup limit reached');
 });
 
-test('reconnecting cannot turn signals into a pipe: they have a daily allowance per address and per network', { timeout: 10000 }, async t => {
-  const { connect } = await setup(t, { limits: { signals: 10_000, addressSignals: 20_000, networkSignals: 40_000 } });
+test('reconnecting cannot turn signals into a pipe: they have a daily allowance per customer and per network', { timeout: 10000 }, async t => {
+  const { connect } = await setup(t, { limits: { signals: 10_000, customerSignals: 20_000, networkSignals: 40_000 } });
   const signal = JSON.stringify({ type: 'signal', payload: 'x'.repeat(5_970) }); // About 6 KB per receiver connection.
   const accepted = async address => {
     const { owner, receiver } = await limitedPair(connect, address);
@@ -510,6 +510,10 @@ test('reconnecting cannot turn signals into a pipe: they have a daily allowance 
   for (let session = 0; session < 3; session++) await accepted('203.0.113.6');
   await refused('203.0.113.7'); // but rotating addresses stops at the network's.
   await accepted('198.51.100.1');
+  // An IPv6 customer's /56 holds 256 /64s; together they get one customer's allowance.
+  for (const address of ['2001:db8:d0:100::1', '2001:db8:d0:100::2', '2001:db8:d0:1ff::1']) await accepted(address);
+  await refused('2001:db8:d0:1aa::1');
+  await accepted('2001:db8:d0:200::1'); // Another customer in the same /48.
 });
 
 test("a spent relay allowance, an address's or everyone's, never blocks setting up a direct connection", { timeout: 10000 }, async t => {
