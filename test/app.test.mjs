@@ -95,6 +95,39 @@ test('actual browser relay locks announced files, queues additions before comple
   assert.equal((await receiver.run('snapshot')).mobile.action, 'save');
 });
 
+test('a receiver says so when the sender goes silent mid-file, and offers to reconnect', { timeout: 20000 }, async t => {
+  const sender = await page(t, await server(t));
+  await sender.run('add', { files: [{ name: 'payload.bin', size: 32 * 1024 * 1024 }] });
+  const ready = await sender.until(s => s.rows.length === 1 && s.link.startsWith('http'));
+  const receiver = await page(t, ready.link, { receiveDelay: 40 });
+  await receiver.until(s => s.status === 'Sender online');
+  await receiver.run('click', { element: 'accept-files' });
+  await receiver.until(s => s.status === 'Receiving payload.bin');
+  await sender.run('stall');
+  // Data already received still counts as progress while it is processed, so keep moving the clock.
+  let snapshot = await receiver.run('snapshot');
+  for (let attempt = 0; attempt < 20 && !snapshot.notice; attempt++) {
+    await receiver.run('advance', { ms: 61_000 }); await delay(500); snapshot = await receiver.run('snapshot');
+  }
+  assert.match(snapshot.notice, /The sender stopped sending/);
+  assert.equal(snapshot.mobile.action, 'retry');
+});
+
+test('a receiver waits quietly while it saves a file or the sender prepares the next one', { timeout: 20000 }, async t => {
+  const sender = await page(t, await server(t), { hashDelay: 1500 });
+  await sender.run('add', { files: [{ name: 'first.bin', size: 1024 * 1024 }] });
+  const ready = await sender.until(s => s.rows.length === 1 && s.link.startsWith('http'));
+  const receiver = await page(t, ready.link, { finishDelay: 1500 });
+  await receiver.until(s => s.status === 'Sender online');
+  await receiver.run('click', { element: 'accept-files' });
+  await receiver.until(s => s.finishing); // Every byte of first.bin is in; the receiver is saving it.
+  await receiver.run('advance', { ms: 61_000 });
+  await sender.run('add', { files: [{ name: 'second.bin', size: 1024 * 1024, byte: 72 }] });
+  await receiver.until(s => s.rows.some(row => row.name === 'first.bin' && row.detail.includes('verified')));
+  await receiver.run('advance', { ms: 61_000 }); // The sender is still hashing second.bin.
+  await receiver.until(s => s.status === 'All files received' && s.rows.length === 2);
+});
+
 test('Node receiver stays connected while a queued addition is still being hashed', { timeout: 20000 }, async t => {
   const sender = await page(t, await server(t), { hashDelay: 700 });
   await sender.run('add', { files: [{ name: 'first.bin', size: 8 * 1024 * 1024 }] });

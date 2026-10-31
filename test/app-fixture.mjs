@@ -7,7 +7,10 @@ import { parseHTML } from 'linkedom';
 
 const { document, HTMLElement, HTMLAnchorElement } = parseHTML(await readFile(new URL('../public/index.html', import.meta.url), 'utf8'));
 const location = new URL(workerData.url), downloads = [];
-let clipboard = '';
+let clipboard = '', finishing = false;
+// Tests move this page's clock forward to reach long timeouts without waiting for them.
+const clock = performance.now.bind(performance); let skew = 0;
+Object.defineProperty(performance, 'now', { configurable: true, value: () => clock() + skew });
 HTMLElement.prototype.focus = () => {};
 HTMLElement.prototype.scrollIntoView = () => {};
 HTMLAnchorElement.prototype.click = function () { downloads.push({ url: this.href, name: this.download }); };
@@ -29,6 +32,7 @@ Object.assign(globalThis, {
     postMessage(data, transfer) {
       if (data.type === 'append' && workerData.receiveDelay) setTimeout(() => this.thread.postMessage(data, transfer), workerData.receiveDelay);
       else if (data.type === 'hash' && workerData.hashDelay) setTimeout(() => this.thread.postMessage(data, transfer), workerData.hashDelay);
+      else if (data.type === 'finish') { finishing = true; setTimeout(() => this.thread.postMessage(data, transfer), workerData.finishDelay || 0); }
       else this.thread.postMessage(data, transfer);
     }
     terminate() { this.thread.terminate(); }
@@ -51,8 +55,10 @@ parentPort.on('message', async ({ id, command, ...args }) => {
         name: row.querySelector('.file-name').textContent, detail: row.querySelector('small').textContent,
         buttons: [...row.querySelectorAll('button')].map(button => ({ label: button.getAttribute('aria-label'), disabled: button.disabled })),
       })),
-      note: $('note').value, editing: !$('cancel-note').hidden, clipboard,
+      note: $('note').value, editing: !$('cancel-note').hidden, clipboard, finishing,
     };
+    else if (command === 'advance') skew += args.ms;
+    else if (command === 'stall') WebSocket.prototype.send = () => {}; // The sender's tab stops sending without closing.
     else if (command === 'add') {
       const files = args.files.map(({ name, size, byte = 71 }) => new File([new Uint8Array(size).fill(byte)], name));
       $('file-input').onchange({ target: { files, value: '' } });

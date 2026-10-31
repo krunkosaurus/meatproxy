@@ -71,7 +71,14 @@ function progress(p, finished = false) {
   if (finished) p.progressActive = false;
   updateMobileAction();
 }
-setInterval(() => { if (peer?.progressActive && !peer.closed && !peer.failed) progress(peer); }, 500);
+// The sender streams a file without pausing longer than its 30 s acknowledgement deadline, so a
+// minute without any packet mid-file means it stopped. A failed sender cannot tell the receiver.
+const SENDER_SILENCE_MS = 60_000;
+setInterval(() => {
+  if (!peer || peer.closed || peer.failed) return;
+  if (!isSender && peer.awaitingData && performance.now() - peer.heard > SENDER_SILENCE_MS) { fail(new Error('The sender stopped sending. Ask them to keep their tab open, then reconnect.')); return; }
+  if (peer.progressActive) progress(peer);
+}, 500);
 function fail(error) {
   const message = error instanceof Error ? error.message : String(error);
   notice(message); status('The handoff paused', message, 'error');
@@ -127,7 +134,7 @@ function abortIncoming(p) {
 function newPeer() {
   abortIncoming(peer);
   if (peer) { clearTimeout(peer.timer); peer.closed = true; peer.pc?.close(); peer.waiters.rejectAll(new Error('The recipient disconnected.')); }
-  peer = { session: '', pc: null, dc: null, transport: '', tx: Promise.resolve(), rx: Promise.resolve(), outSeq: 0, inSeq: 0, candidates: [], ready: false, sent: new Set(), announced: new Set(), waiters: createWaiters(), closed: false, failed: false, sending: false, total: 0, done: 0 };
+  peer = { session: '', pc: null, dc: null, transport: '', tx: Promise.resolve(), rx: Promise.resolve(), outSeq: 0, inSeq: 0, candidates: [], ready: false, sent: new Set(), announced: new Set(), waiters: createWaiters(), closed: false, failed: false, sending: false, total: 0, done: 0, heard: 0, awaitingData: false };
   return peer;
 }
 async function signal(value, p = peer) {
@@ -230,8 +237,10 @@ function sendPayload(p, type, bytes) {
 }
 const sendControl = (p, value) => sendPayload(p, 0, encodeJSON(value));
 function receivePacket(p, raw) {
+  p.heard = performance.now();
   p.rx = p.rx.then(async () => {
     if (p !== peer || p.closed || p.failed) return;
+    p.heard = performance.now(); // Data that arrived earlier is still progress while it is processed.
     const plain = await decrypt(key, raw, `data:${room}:${p.session}:${isSender ? 'receiver' : 'sender'}`);
     if (plain.length < 5 || new DataView(plain.buffer, plain.byteOffset).getUint32(0) !== p.inSeq++) throw new Error('Transfer order could not be verified. Reconnect to try again.');
     if (plain[4] === 0) await onControl(p, decodeJSON(plain.slice(5)));
@@ -267,7 +276,7 @@ async function onControl(p, message) {
     let name = original, n = 2;
     while (folderNames.has(name.toLowerCase())) name = `${n++}-${original}`;
     folderNames.add(name.toLowerCase());
-    p.incoming = { meta, token, parts: [], buffered: 0, offset: 0 };
+    p.incoming = { meta, token, parts: [], buffered: 0, offset: 0 }; p.awaitingData = true;
     await fileTasks.run('begin', { token, meta, directory: receiveFolder, name });
     if (p !== peer || p.closed || p.failed) return;
     meta.state = 'Receiving…'; renderFiles();
@@ -275,6 +284,7 @@ async function onControl(p, message) {
   } else if (message.type === 'end' && !isSender) {
     const item = p.incoming;
     if (!item || item.meta.id !== message.id) throw new Error('Unexpected file completion.');
+    p.awaitingData = false; // Saving can take a while; the sender is waiting for us now.
     await flushIncoming(item);
     const result = await fileTasks.run('finish', { token: item.token });
     if (p !== peer || p.closed || p.failed) return;

@@ -22,7 +22,7 @@ For large handoffs, supporting browsers offer **Receive to a folder** before acc
 
 The regular **Accept files** flow works without folder access. It retains browser-managed Blobs for downloading, so very large handoffs can still use substantial browser storage or memory. Both flows hash incrementally in a worker, using bounded reads and receive buffers instead of full-file JavaScript arrays. Multiple-file ZIP checksums also run in a separate worker, with preparation progress, so saving does not block the interface or incoming acknowledgements. File-system access is feature-detected; browsers without the folder picker use the regular download flow.
 
-Mobile backgrounding, device sleep, Safari, and Firefox have not yet been verified. This prototype restarts interrupted transfers rather than resuming partial files. Folder hierarchy is not preserved.
+Mobile backgrounding, device sleep, Safari, and Firefox have not yet been verified. This prototype restarts interrupted transfers rather than resuming partial files. If the sender's page stops sending in the middle of a file for a minute, the receiving page says so and offers to reconnect; reconnecting resends the files that were not yet delivered. Folder hierarchy is not preserved.
 
 ## Receive with an agent
 
