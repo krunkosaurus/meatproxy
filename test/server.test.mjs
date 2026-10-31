@@ -491,8 +491,8 @@ test('signals count their bytes on the wire, per receiver connection', { timeout
   assert.equal(await closed, '4001 Connection setup limit reached');
 });
 
-test('reconnecting cannot turn signals into a pipe: they have a daily allowance per address and network', { timeout: 10000 }, async t => {
-  const { connect } = await setup(t, { limits: { signals: 10_000, addressSignals: 20_000, networkSignals: 30_000 } });
+test('reconnecting cannot turn signals into a pipe: they have a daily allowance per address, not per network', { timeout: 10000 }, async t => {
+  const { connect } = await setup(t, { limits: { signals: 10_000, addressSignals: 20_000 } });
   const signal = JSON.stringify({ type: 'signal', payload: 'x'.repeat(5_970) }); // About 6 KB per receiver connection.
   const accepted = async address => {
     const { owner, receiver } = await limitedPair(connect, address);
@@ -502,13 +502,12 @@ test('reconnecting cannot turn signals into a pipe: they have a daily allowance 
   const refused = async address => {
     const { receiver } = await limitedPair(connect, address);
     const closed = closeOf(receiver); receiver.send(signal);
-    assert.equal(await closed, '4001 Connection setup limit reached', address);
+    assert.equal(await closed, "4006 This network has used today's connection setup allowance; try again after 00:00 UTC", address);
   };
   for (let session = 0; session < 3; session++) await accepted('203.0.113.5');
-  await refused('203.0.113.5'); // The address's allowance.
-  await accepted('203.0.113.6'); await accepted('203.0.113.7');
-  await refused('203.0.113.8'); // The /24's allowance.
-  await accepted('192.0.2.1');
+  await refused('203.0.113.5');
+  // A neighbour cannot spend anyone else's allowance, so the rest of the /24 can still connect.
+  for (const neighbour of ['203.0.113.6', '203.0.113.7', '203.0.113.8', '203.0.113.9']) await accepted(neighbour);
 });
 
 test('a spent relay allowance never blocks setting up a direct connection', { timeout: 10000 }, async t => {
@@ -562,6 +561,20 @@ test("a session reserved yesterday returns nothing to today's allowance", { time
   assert.equal(await startRelay(await limitedPair(connect)), "4004 The relay has reached today's limit; try again after 00:00 UTC");
 });
 
+test('a slice taken after midnight returns its unused part to the new day', { timeout: 10000 }, async t => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.UTC(2026, 9, 31, 23, 59) });
+  const { connect } = await setup(t, { limits: { slice: 50_000, daily: 120_000 } });
+  const crossing = await limitedPair(connect);
+  let received = 0; crossing.receiver.on('message', (data, binary) => { if (binary) received += data.length; });
+  assert.equal(await startRelay(crossing), 'admitted'); // A slice from yesterday.
+  crossing.owner.send(Buffer.alloc(40_000)); await until(() => received === 40_000, 'data before midnight');
+  t.mock.timers.tick(6 * 60 * 1000);
+  crossing.owner.send(Buffer.alloc(20_000)); await until(() => received === 60_000, 'data after midnight'); // A slice from today.
+  crossing.receiver.close(); await nextJSON(crossing.owner); // Today keeps only the 10,005 bytes it carried.
+  for (let i = 0; i < 2; i++) assert.equal(await startRelay(await limitedPair(connect)), 'admitted');
+  assert.equal(await startRelay(await limitedPair(connect)), "4004 The relay has reached today's limit; try again after 00:00 UTC");
+});
+
 test('a link has a relay allowance across its receivers', { timeout: 10000 }, async t => {
   const { connect } = await setup(t, { limits: { slice: 50_000, room: 120_000 } });
   const { owner, room } = await create(connect);
@@ -575,15 +588,26 @@ test('a link has a relay allowance across its receivers', { timeout: 10000 }, as
   assert.equal(await startRelay({ owner, receiver }), '4002 This link has used its relay allowance; ask the sender for a fresh link');
 });
 
+// A raw upgrade never answers the close frame, so a refused socket stays open until the relay terminates it.
+const rawUpgrade = (t, app, address) => new Promise(resolve => {
+  const socket = connectTCP(app.server.address().port, '127.0.0.1');
+  socket.once('data', chunk => resolve(Number(chunk.toString().split(' ')[1])));
+  socket.write(`GET /socket HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: ${randomBytes(16).toString('base64')}\r\nSec-WebSocket-Version: 13\r\nX-Real-IP: ${address}\r\n\r\n`);
+  t.after(() => socket.destroy());
+});
+
+test("sockets opened only to be refused take none of the service's slots, and their pool is small", { timeout: 10000 }, async t => {
+  const { app, connect } = await setup(t, { maxClients: 3, maxConnections: { address: 1, network: 10 }, maxRefusing: 1 });
+  await connect('198.51.100.1'); await connect('198.51.100.2'); // Two of three slots.
+  assert.equal(await rawUpgrade(t, app, '198.51.100.1'), 101); // Opened to be refused, and lingering.
+  assert.equal(await rawUpgrade(t, app, '198.51.100.2'), 429, 'The pool of sockets being refused is full');
+  const third = await connect('198.51.100.3');
+  assert.equal(third.readyState, WebSocket.OPEN, 'The lingering refusal does not hold the last slot');
+});
+
 test('behind a proxy, extra connections from one address or network are closed with a reason, then refused', { timeout: 10000 }, async t => {
   const { app, connect } = await setup(t, { maxConnections: { address: 2, network: 3 } });
-  // A raw upgrade never answers the close frame, so a refused socket stays open until the relay terminates it.
-  const upgrade = address => new Promise(resolve => {
-    const socket = connectTCP(app.server.address().port, '127.0.0.1');
-    socket.once('data', chunk => resolve(Number(chunk.toString().split(' ')[1])));
-    socket.write(`GET /socket HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: ${randomBytes(16).toString('base64')}\r\nSec-WebSocket-Version: 13\r\nX-Real-IP: ${address}\r\n\r\n`);
-    t.after(() => socket.destroy());
-  });
+  const upgrade = address => rawUpgrade(t, app, address);
   await connect('2001:db8:1:2::1'); await connect('2001:db8:1:2:abcd::5'); // One /64.
   const told = await connect('2001:db8:1:2:ffff::1');
   assert.equal(await closeOf(told), '4005 Too many connections from this network; close other Meatproxy tabs and try again');

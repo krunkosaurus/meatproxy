@@ -28,6 +28,7 @@ function relayLimit(code, own) {
     4003: own ? 'Your network has used its relay allowance for now. Try again later.' : `${other}'s network has used its relay allowance for now.`,
     4004: "The relay has reached today's limit. Try again after 00:00 UTC.",
     4005: 'Too many Meatproxy connections from your network. Close other Meatproxy tabs and try again.',
+    4006: own ? 'Your network has made too many connection attempts today. Try again after 00:00 UTC.' : `${other}'s network has made too many connection attempts today.`,
   }[code];
 }
 function packet(value) { if (ws?.readyState !== WebSocket.OPEN) throw new Error('The connection closed. Start a new handoff.'); ws.send(JSON.stringify(value)); }

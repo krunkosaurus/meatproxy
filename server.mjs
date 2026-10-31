@@ -69,10 +69,10 @@ const relayLimits = {
   toReceiver: MAX_BYTES + 64 * 1024 * 1024, // Per receiver connection: one handoff plus encryption and control.
   toSender: 8 * 1024 * 1024, // Per receiver connection: acknowledgements and control messages.
   slice: 64 * 1024 * 1024, // Reserved from the allowances at a time as a session relays.
-  signals: 1024 * 1024, // Per receiver connection and direction: connection setup.
-  // Sent per day; separate from the relay allowances, so a spent relay allowance never blocks direct setup.
-  addressSignals: 64 * 1024 * 1024,
-  networkSignals: 256 * 1024 * 1024,
+  signals: 64 * 1024, // Per receiver connection and direction: setup takes about 5-15 KB.
+  // Sent per day by one address. Separate from the relay allowances, so a spent relay allowance never
+  // blocks direct setup, and per address only, so nobody can spend a whole network's.
+  addressSignals: 256 * 1024 * 1024,
   room: 4 * 1024 ** 3, // Per link, over its 12-hour life.
   addressDaily: 4 * 1024 ** 3,
   networkDaily: 16 * 1024 ** 3,
@@ -88,6 +88,7 @@ const refusals = {
   network: [4003, 'This network has used its relay allowance for now; try again later'],
   relay: [4004, "The relay has reached today's limit; try again after 00:00 UTC"],
   connections: [4005, 'Too many connections from this network; close other Meatproxy tabs and try again'],
+  setup: [4006, "This network has used today's connection setup allowance; try again after 00:00 UTC"],
 };
 // One user typically controls an IPv4 address or an IPv6 /64, and one provider network an IPv4 /24
 // or an IPv6 /48, so limits count those as one address and one network.
@@ -126,8 +127,9 @@ function renderPreview(html, preview, url) {
     .replace(/(<meta (?:name|property)="([^"]+)" content=")[^"]*(")/g, (tag, start, name, end) => name in values ? start + escapeHTML(values[name]) + end : tag);
 }
 
-export function createApp({ origin = process.env.PUBLIC_ORIGIN, maxClients = 200, maxConnections = connectionLimits, limits = {} } = {}) {
+export function createApp({ origin = process.env.PUBLIC_ORIGIN, maxClients = 200, maxConnections = connectionLimits, maxRefusing = 20, limits = {} } = {}) {
   const rooms = new Map();
+  let refusing = 0;
   const limit = { ...relayLimits, ...limits };
   const connections = new Map(), usage = { day: -1, total: 0, byKey: new Map(), signals: new Map() };
   const count = (map, key, change) => { const next = (map.get(key) || 0) + change; if (next > 0) map.set(key, next); else map.delete(key); };
@@ -156,6 +158,7 @@ export function createApp({ origin = process.env.PUBLIC_ORIGIN, maxClients = 200
       const refusal = spend(receiver.keys, limit.slice);
       if (refusal) return refusal;
       receiver.room.relayed += limit.slice; receiver.reservation.bytes += limit.slice;
+      receiver.reservation.day = usage.day; // Only the latest slice can be partly unused.
     }
   };
   const release = receiver => {
@@ -166,9 +169,9 @@ export function createApp({ origin = process.env.PUBLIC_ORIGIN, maxClients = 200
   };
   const spendSignals = (keys, bytes) => {
     today();
-    const used = key => usage.signals.get(key) || 0;
-    if (keys && (used(keys.address) + bytes > limit.addressSignals || used(keys.network) + bytes > limit.networkSignals)) return refusals.signals;
-    for (const key of keysOf(keys)) count(usage.signals, key, bytes);
+    if (!keys) return;
+    if ((usage.signals.get(keys.address) || 0) + bytes > limit.addressSignals) return refusals.setup;
+    count(usage.signals, keys.address, bytes);
   };
   // The other peer learns why from sender-left or peer-left.
   const closeWith = (ws, [code, reason]) => { ws.closeCode = code; ws.closeReason = reason; ws.close(code, reason); };
@@ -211,17 +214,19 @@ export function createApp({ origin = process.env.PUBLIC_ORIGIN, maxClients = 200
     const requestOrigin = req.headers.origin;
     const allowedOrigin = origin || `http://${req.headers.host}`;
     // Browsers supply Origin; the downloadable Node client has no ambient cookies and no Origin.
-    if (req.url !== '/socket' || (requestOrigin && requestOrigin !== allowedOrigin) || wss.clients.size >= maxClients) {
+    // Sockets opened only to be refused do not take one of the service's slots.
+    if (req.url !== '/socket' || (requestOrigin && requestOrigin !== allowedOrigin) || wss.clients.size - refusing >= maxClients) {
       socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n'); return;
     }
     // Nginx sets X-Real-IP to the client's address. Without a proxy (local development), no per-address limits apply.
     const keys = req.headers['x-real-ip'] ? addressKeys(req.headers['x-real-ip']) : null;
     const over = factor => keys && ((connections.get(keys.address) || 0) >= factor * maxConnections.address || (connections.get(keys.network) || 0) >= factor * maxConnections.network);
-    // Up to twice the limit, the socket opens only to be closed with a reason the page can show.
-    if (over(2)) { socket.end('HTTP/1.1 429 Too Many Requests\r\nConnection: close\r\n\r\n'); return; }
     const refused = over(1);
+    // A few extra sockets open only to be closed with a reason the page can show; beyond that, 429.
+    if (over(2) || (refused && refusing >= maxRefusing)) { socket.end('HTTP/1.1 429 Too Many Requests\r\nConnection: close\r\n\r\n'); return; }
     // Counted from the handshake until the socket closes, so refused or lingering sockets cannot pile up.
     if (keys) { count(connections, keys.address, 1); count(connections, keys.network, 1); socket.once('close', () => { count(connections, keys.address, -1); count(connections, keys.network, -1); }); }
+    if (refused) { refusing++; socket.once('close', () => { refusing--; }); }
     wss.handleUpgrade(req, socket, head, ws => {
       ws.keys = keys;
       if (!refused) { wss.emit('connection', ws); return; }
