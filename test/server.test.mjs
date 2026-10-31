@@ -309,8 +309,28 @@ test('a slow receiver pauses the relay sender instead of disconnecting it; every
   await until(() => chunks.length === 512, 'every relayed message');
   await until(() => !relayedSender.isPaused, 'the relay to resume the sender');
   assert.equal(closed, false);
-  assert.ok(peak <= 1024 * 1024, `The relay buffered ${peak} bytes for one receiver`);
+  // 512 KiB, plus at most one 64 KiB socket read already parsed when the sender is paused.
+  assert.ok(peak <= 640 * 1024, `The relay buffered ${peak} bytes for one receiver`);
   chunks.forEach((chunk, i) => assert.ok(chunk.equals(Buffer.alloc(60 * 1024, i % 251)), `Message ${i} arrived intact and in order`));
+});
+
+test('a flood of tiny messages is paused by count, not only by bytes', { timeout: 20000 }, async t => {
+  const { owner, receiver, relayedSender, relayedReceiver } = await relayPair(t);
+  // Each queued message costs heap however small it is, so bytes alone do not bound memory.
+  let queued = 0, peak = 0; const send = relayedReceiver.send;
+  relayedReceiver.send = function (data, options, callback) {
+    queued++; peak = Math.max(peak, queued);
+    return send.call(this, data, options, (...args) => { queued--; callback?.(...args); });
+  };
+  let delivered = 0; receiver.on('message', (data, binary) => { if (binary) delivered++; });
+  receiver.pause();
+  for (let i = 0; i < 200_000; i++) owner.send(Buffer.alloc(64, i & 255)); // About 13 MiB on the wire.
+  await until(() => relayedSender.isPaused, 'the relay to pause the sender');
+  await delay(200);
+  // 256 messages, plus at most one 64 KiB socket read of 70-byte frames (about 940).
+  assert.ok(peak <= 1_300, `The relay queued ${peak} messages for one receiver`);
+  receiver.resume();
+  await until(() => delivered === 200_000, 'every tiny message');
 });
 
 test('a receiver that leaves while the relay holds the sender frees the link for the next recipient', { timeout: 20000 }, async t => {
@@ -359,6 +379,31 @@ test('the liveness check keeps a socket whose messages keep arriving and drops a
   }
   await silentClosed;
   assert.equal(busy.readyState, WebSocket.OPEN);
+});
+
+test('a sender held during the interval survives a liveness check that lands just after it resumes', { timeout: 20000 }, async t => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  const { owner, receiver, relayedSender } = await relayPair(t);
+  receiver.pause(); flood(owner);
+  await until(() => relayedSender.isPaused, 'the relay to pause the sender');
+  const left = nextMessageOrClose(owner);
+  t.mock.timers.tick(25_000);
+  // The receiver drained just enough to release the sender, which has not read its pong yet.
+  relayedSender.resume();
+  t.mock.timers.tick(25_000);
+  assert.equal((await left).type, 'peer-left');
+  await publish(owner, { count: 0, totalBytes: 0, names: [] });
+});
+
+test('two sockets that flood each other and stop reading are both dropped by the liveness check', { timeout: 20000 }, async t => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  const { owner, receiver, relayedSender, relayedReceiver } = await relayPair(t);
+  owner.pause(); receiver.pause(); flood(owner); flood(receiver);
+  await until(() => relayedSender.isPaused && relayedReceiver.isPaused, 'the relay to pause both sockets');
+  const closed = Promise.all([once(owner, 'close'), once(receiver, 'close')]);
+  t.mock.timers.tick(25_000);
+  t.mock.timers.tick(25_000);
+  await closed;
 });
 
 test('the liveness check drops a stalled receiver but keeps the sender the relay is holding', { timeout: 20000 }, async t => {

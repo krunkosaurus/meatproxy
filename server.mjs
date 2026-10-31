@@ -59,8 +59,9 @@ const built = fingerprint(new Map(await Promise.all([...assets, ['/index.html', 
 const versioned = path => `${path}?v=${built.get(path).version}`;
 const tokenPattern = /^[A-Za-z0-9_-]{22}$/;
 const roomLifetime = 12 * 60 * 60 * 1000;
-// Above this, the relay stops reading from a sender until its receiver catches up.
-const relayBufferBytes = 512 * 1024;
+// Above either limit, the relay stops reading from a sender until its receiver catches up.
+// Each queued message costs heap however small it is, so messages are counted as well as bytes.
+const relayBufferBytes = 512 * 1024, relayBufferMessages = 256;
 const escapeHTML = value => value.replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
 
 function previewOf(room) {
@@ -135,7 +136,7 @@ export function createApp({ origin = process.env.PUBLIC_ORIGIN, maxClients = 200
     wss.handleUpgrade(req, socket, head, ws => wss.emit('connection', ws));
   });
   wss.on('connection', ws => {
-    ws.alive = true;
+    ws.alive = true; ws.held = false; ws.relayQueue = 0;
     ws.on('pong', () => { ws.alive = true; });
     const setupTimer = setTimeout(() => { if (!ws.room) ws.close(1008, 'Join a handoff first'); }, 10_000);
     ws.on('error', () => {}); // Errors are followed by close; close performs room cleanup.
@@ -148,8 +149,10 @@ export function createApp({ origin = process.env.PUBLIC_ORIGIN, maxClients = 200
         if (!peer || peer.readyState !== WebSocket.OPEN || (ws.owner && ws.room.previousSession)) return;
         // Pausing lets TCP slow the sender's browser. Write callbacks also fire, with an
         // error, when the receiver's socket is destroyed, so a departed receiver releases it.
-        peer.send(data, { binary: true }, () => { if (ws.isPaused && peer.bufferedAmount <= relayBufferBytes) ws.resume(); });
-        if (peer.bufferedAmount > relayBufferBytes) ws.pause();
+        const backlogged = () => peer.bufferedAmount > relayBufferBytes || peer.relayQueue > relayBufferMessages;
+        peer.relayQueue++;
+        peer.send(data, { binary: true }, () => { peer.relayQueue--; if (ws.isPaused && !backlogged()) ws.resume(); });
+        if (backlogged()) { ws.pause(); ws.held = true; }
         return;
       }
       let msg;
@@ -195,8 +198,12 @@ export function createApp({ origin = process.env.PUBLIC_ORIGIN, maxClients = 200
   });
   const heartbeat = setInterval(() => {
     for (const ws of wss.clients) {
-      // A paused sender cannot read its pong until its receiver drains or is dropped.
-      if (!ws.alive && !ws.isPaused) { ws.terminate(); continue; }
+      // A sender held at any time since the last check may not have read its pong yet, so its
+      // receiver's liveness decides. Two sockets holding each other are both checked.
+      const peer = ws.owner ? ws.room?.guest : ws.room?.owner;
+      const exempt = ws.held && !peer?.isPaused;
+      ws.held = ws.isPaused;
+      if (!ws.alive && !exempt) { ws.terminate(); continue; }
       ws.alive = false; ws.ping();
       if (ws.room && Date.now() - ws.room.created >= roomLifetime) ws.close(1000, 'Handoff expired after 12 hours');
     }
