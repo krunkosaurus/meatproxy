@@ -74,10 +74,11 @@ Preview metadata is held only in room memory and removed when the sender leaves.
 - Public resource limits: at most 200 connected sockets, 64 KiB per WebSocket message, relay buffering that pauses a sender once 512 KiB or 256 messages are waiting for its receiver, a 12-hour room lifetime, and a 10-second initial handshake deadline. The service has CPU and memory limits to protect the shared host.
 - The relay enforces the handoff limits itself, so a modified client cannot use it as an open pipe:
   - Each receiver connection relays at most one full handoff from the sender (512 MiB plus 64 MiB for encryption and control messages) and 8 MiB back, and each side may send 1 MiB of connection-setup signals, counted in bytes on the wire.
-  - Relayed bytes count against the receiving side: 4 GiB per day for one address (an IPv4 address or IPv6 /64), 16 GiB per day for one network (an IPv4 /24 or IPv6 /48), and 50 GiB per day for the whole relay. A link may relay 4 GiB over its life. Signals count toward the daily allowances of the side that sends them.
-  - These allowances are checked once, when a relay session starts. The session reserves the most it may carry, and the unused part is returned when the receiver leaves, so an admitted transfer never stops partway for a daily limit. A refused session is closed before any file data moves.
-  - Each address may hold 32 connections and each network 64; further connections are refused before the WebSocket handshake.
-  - When a limit closes a connection, the relay gives the reason, and the other side's page and the command-line receiver show it.
+  - Relayed bytes count against the receiving side: 4 GiB per day for one address (an IPv4 address or IPv6 /64), 16 GiB per day for one network (an IPv4 /24 or IPv6 /48), and 50 GiB per day for the whole relay. A link may relay 4 GiB over its life.
+  - A relay session reserves its allowance 64 MiB at a time as it relays, so an idle session holds little. When an allowance runs out, only that receiver's connection closes, with the reason; the sender's link stays open, and the unused part of the last reservation returns.
+  - Connection-setup signals have their own daily allowance (64 MiB per address, 256 MiB per network), so a spent relay allowance never blocks a direct WebRTC connection.
+  - Each address may hold 16 connections and each network 32. A few more are accepted only to be closed with a reason; beyond twice the limit, connections are refused before the WebSocket handshake.
+  - When a limit closes a connection, the relay sends a close code that each page words for its reader, and the command-line receiver prints the reason. The other side is told too.
   - Daily counts reset at midnight UTC and when the service restarts. Direct WebRTC transfers do not use the relay and are not counted.
 
 ## Hosting

@@ -19,6 +19,17 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const size = bytes => bytes < 1024 ? `${bytes} B` : bytes < 1024 ** 2 ? `${(bytes / 1024).toFixed(1)} KB` : `${(bytes / 1024 ** 2).toFixed(1)} MB`;
 function status(title, detail, state = '') { $('status').textContent = title; $('status-detail').textContent = detail; $('status-dot').className = `status-dot ${state}`; updateMobileAction(); }
 function notice(message) { $('notice').textContent = message; $('notice').hidden = !message; }
+// The relay closes a connection with these codes when it reaches a limit. own: the reader's connection was closed.
+function relayLimit(code, own) {
+  const other = isSender ? 'The recipient' : 'The sender';
+  return {
+    4001: own ? 'This connection sent more than a handoff allows.' : `${other}'s connection sent more than a handoff allows.`,
+    4002: `This link has used its relay allowance. ${isSender ? 'Start a new handoff to make a fresh link.' : 'Ask the sender for a fresh link.'}`,
+    4003: own ? 'Your network has used its relay allowance for now. Try again later.' : `${other}'s network has used its relay allowance for now.`,
+    4004: "The relay has reached today's limit. Try again after 00:00 UTC.",
+    4005: 'Too many Meatproxy connections from your network. Close other Meatproxy tabs and try again.',
+  }[code];
+}
 function packet(value) { if (ws?.readyState !== WebSocket.OPEN) throw new Error('The connection closed. Start a new handoff.'); ws.send(JSON.stringify(value)); }
 function updateCommand() {
   $('agent-command').textContent = `node meatproxy-receive.mjs '${location.origin}/s/${room}#${secret}' ./handoff`;
@@ -476,13 +487,14 @@ async function connect() {
       else if (msg.type === 'busy') { ended = true; fail(new Error('Someone else is receiving this handoff. Try again after they close their tab.')); }
       else if (msg.type === 'peer-left') {
         if (peer) { peer.closed = true; peer.pc?.close(); clearTimeout(peer.timer); peer.waiters.rejectAll(new Error('The recipient disconnected.')); }
-        // The relay names a limit when it closed the other side.
-        status('The recipient has left.', `${msg.reason ? `The relay told them: ${msg.reason}. ` : ''}Your link is still live. Someone else can open it now.`);
+        const limit = relayLimit(msg.code, false);
+        status('The recipient has left.', msg.code === 4002 ? limit : `${limit ? `${limit} ` : ''}Your link is still live. Someone else can open it now.`);
         renderFiles();
       } else if (msg.type === 'sender-left') {
         abortIncoming(peer);
         ended = true; if (peer) { peer.closed = true; peer.pc?.close(); clearTimeout(peer.timer); }
-        status('The sender has left.', `${msg.reason ? `The relay told them: ${msg.reason}. ` : ''}${received.size ? 'Your received files are still here. Save them before closing this tab.' : 'Ask the sender for a fresh link.'}`);
+        const limit = relayLimit(msg.code, false);
+        status('The sender has left.', `${limit ? `${limit} ` : ''}${received.size ? 'Your received files are still here. Save them before closing this tab.' : 'Ask the sender for a fresh link.'}`);
       }
     }).catch(fail);
   };
@@ -494,8 +506,9 @@ async function connect() {
       abortIncoming(peer);
       // The server explains closes it initiates, such as relay limits.
       const advice = isSender ? 'Start a new handoff to make a fresh link.' : 'Save any completed files, then reconnect.';
-      status('Connection closed', event.reason ? `${event.reason}. ${advice}` : advice, 'error');
-      $('retry').hidden = isSender;
+      status('Connection closed', relayLimit(event.code, true) || (event.reason ? `${event.reason}. ${advice}` : advice), 'error');
+      $('retry').hidden = isSender || event.code === 4002; // Reconnecting cannot restore a link's relay allowance.
+      updateMobileAction();
     }
   };
 }

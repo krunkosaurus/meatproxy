@@ -106,9 +106,9 @@ test('when a relay limit closes the sender, both pages and the Node receiver say
   let snapshot;
   for (let attempt = 0; attempt < 300 && snapshot?.status !== 'Connection closed'; attempt++) { await delay(20); snapshot = await sender.run('snapshot'); }
   assert.equal(snapshot.status, 'Connection closed');
-  assert.match(snapshot.detail, /^Relay limit reached for this handoff\. Start a new handoff/);
+  assert.equal(snapshot.detail, 'This connection sent more than a handoff allows.');
   const told = await receiver.until(s => s.status === 'The sender has left.');
-  assert.match(told.detail, /^The relay told them: Relay limit reached for this handoff\. Ask the sender/);
+  assert.equal(told.detail, "The sender's connection sent more than a handoff allows. Ask the sender for a fresh link.");
   // The downloadable receiver always uses the relay.
   const agentSender = await page(t, link);
   await agentSender.run('add', { files: [{ name: 'payload.bin', size: 1024 * 1024 }] });
@@ -120,6 +120,20 @@ test('when a relay limit closes the sender, both pages and the Node receiver say
   let output = ''; child.stdout.on('data', chunk => { output += chunk; }); child.stderr.on('data', chunk => { output += chunk; });
   assert.equal(await new Promise(resolve => child.on('exit', resolve)), 1);
   assert.match(output, /The relay closed the sender's connection: Relay limit reached for this handoff\./);
+});
+
+test('when a link has used its relay allowance, each page says what to do instead of offering Reconnect', { timeout: 20000 }, async t => {
+  const sender = await page(t, await server(t, { limits: { room: 1 } }));
+  await sender.run('add', { files: [{ name: 'payload.bin', size: 1024 }] });
+  const ready = await sender.until(s => s.rows.length === 1 && s.link.startsWith('http'));
+  const receiver = await page(t, ready.link);
+  await receiver.until(s => s.status === 'Sender online');
+  await receiver.run('click', { element: 'accept-files' });
+  const refused = await receiver.until(s => s.status === 'Connection closed');
+  assert.equal(refused.detail, 'This link has used its relay allowance. Ask the sender for a fresh link.');
+  assert.notEqual(refused.mobile.action, 'retry');
+  const left = await sender.until(s => s.status === 'The recipient has left.');
+  assert.equal(left.detail, 'This link has used its relay allowance. Start a new handoff to make a fresh link.');
 });
 
 test('Node receiver stays connected while a queued addition is still being hashed', { timeout: 20000 }, async t => {
