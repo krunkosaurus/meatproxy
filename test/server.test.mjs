@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { connect as connectTCP } from 'node:net';
 import WebSocket from 'ws';
 import { createApp, fingerprint } from '../server.mjs';
 import { makeSecret, importSecret, encrypt, decrypt, validateManifest } from '../public/protocol.js';
@@ -39,7 +39,8 @@ test('browser worker and imported handoff modules are served as JavaScript', asy
 });
 
 const pageReferences = html => [...html.matchAll(/(?:href|src|content)="(?:https:\/\/meatproxy\.to)?(\/[\w.-]+(?:\?[^"]*)?)"/g)].map(match => match[1]);
-const version = bytes => createHash('sha256').update(bytes).digest('hex').slice(0, 12);
+// The version of bytes that reference nothing, under the server's actual response headers.
+const version = bytes => fingerprint(new Map([['/bytes.bin', bytes]])).get('/bytes.bin').version;
 
 test('every asset the page references is versioned by content; only that exact version is cacheable', async t => {
   const { app } = await setup(t);
@@ -102,6 +103,22 @@ test('changing a file gives it, and everything that references it, a new URL; no
   assert.ok(page.includes(`content="https://meatproxy.to/og.png?v=${version(sources.get('/og.png'))}"`));
   assert.ok(page.includes('<a href="/">Home</a>'));
   assert.equal(after.get('/og.png').body, sources.get('/og.png'), 'Binary assets are served as they are');
+  // Caches keep headers with the bytes, so changing response headers must change every version.
+  const headersChanged = fingerprint(sources, 'other response headers');
+  assert.ok([...before.keys()].every(path => before.get(path).version !== headersChanged.get(path).version));
+});
+
+test('a malformed request target gets 400 and the service keeps running', async t => {
+  const { app } = await setup(t);
+  const socket = connectTCP(app.server.address().port, '127.0.0.1'); await once(socket, 'connect');
+  socket.end('GET //[ HTTP/1.1\r\nHost: meatproxy.to\r\nConnection: close\r\n\r\n');
+  let reply = ''; for await (const chunk of socket) reply += chunk;
+  assert.match(reply, /^HTTP\/1\.1 400 /);
+  assert.equal((await fetch(`http://127.0.0.1:${app.server.address().port}/healthz`)).status, 200);
+});
+
+test('a public origin that is not a URL stops the service at startup, not on the first recipient link', () => {
+  assert.throws(() => createApp({ origin: 'meatproxy.to' }), /Invalid URL/);
 });
 
 test('social crawlers get a valid public preview without exposing or joining a handoff', async t => {

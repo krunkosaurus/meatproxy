@@ -24,10 +24,19 @@ const assets = new Map([
   ...['online', 'busy', 'offline'].map(state => [`/og-${state}.png`, [`og-${state}.png`, 'image/png']]),
   ['/receive.mjs', ['receive.mjs', 'text/javascript; charset=utf-8']],
 ]);
+const securityHeaders = {
+  'X-Content-Type-Options': 'nosniff',
+  'Referrer-Policy': 'no-referrer',
+  'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'",
+  'Permissions-Policy': 'camera=(), microphone=(), geolocation=()',
+};
+// Caches keep headers with the bytes, so the headers are part of every version too.
+const responseHeaders = JSON.stringify([securityHeaders, [...assets]]);
 
 // Every reference to a local asset gets ?v=<content hash>. A file's hash covers its rewritten
-// references, so changing a module also gives new URLs to everything that imports it.
-export function fingerprint(sources) {
+// references, so changing a module also gives new URLs to everything that imports it. Content
+// hashes cannot express a reference cycle, so a cycle fails when the server starts.
+export function fingerprint(sources, headers = responseHeaders) {
   const built = new Map();
   const versioned = path => `${path}?v=${build(path).version}`;
   const references = {
@@ -38,7 +47,7 @@ export function fingerprint(sources) {
     if (!built.has(path)) {
       const rewrite = references[path.split('.').pop()];
       const body = rewrite ? Buffer.from(sources.get(path).toString().replace(...rewrite)) : sources.get(path);
-      built.set(path, { body, version: createHash('sha256').update(body).digest('hex').slice(0, 12) });
+      built.set(path, { body, version: createHash('sha256').update(headers).update(body).digest('hex').slice(0, 12) });
     }
     return built.get(path);
   }
@@ -79,13 +88,13 @@ function renderPreview(html, preview, url) {
 
 export function createApp({ origin = process.env.PUBLIC_ORIGIN, maxClients = 200 } = {}) {
   const rooms = new Map();
+  const publicOrigin = new URL(origin || 'https://meatproxy.to');
   const server = http.createServer((req, res) => {
-    const url = new URL(req.url, 'http://localhost'), path = url.pathname;
-    res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('Referrer-Policy', 'no-referrer');
+    for (const header of Object.entries(securityHeaders)) res.setHeader(...header);
     res.setHeader('Cache-Control', 'no-store');
-    res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'");
-    res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+    let url;
+    try { url = new URL(req.url, 'http://localhost'); } catch { res.writeHead(400).end(); return; } // For example, GET //[
+    const path = url.pathname;
     if (!['GET', 'HEAD'].includes(req.method)) { res.writeHead(405).end(); return; }
     if (path === '/healthz') { res.setHeader('Content-Type', 'application/json'); res.end('{"ok":true,"version":"0.1.0"}'); return; }
     // Fetching a preview never joins a handoff or receives encrypted file data.
@@ -100,9 +109,9 @@ export function createApp({ origin = process.env.PUBLIC_ORIGIN, maxClients = 200
     if (!asset) { res.writeHead(404).end('Not found'); return; }
     let { body, version } = built.get(assets.has(path) ? path : '/index.html');
     res.setHeader('Content-Type', asset[1]);
-    // A versioned URL names these exact bytes, so browsers and Cloudflare may keep them.
+    // A versioned URL names this exact response, so browsers and Cloudflare may keep it.
     if (assets.has(path) && url.searchParams.get('v') === version) res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
-    if (handoff) body = renderPreview(body.toString(), previewOf(rooms.get(handoff[1])), new URL(path, origin || 'https://meatproxy.to').href);
+    if (handoff) body = renderPreview(body.toString(), previewOf(rooms.get(handoff[1])), new URL(path, publicOrigin).href);
     res.end(req.method === 'HEAD' ? undefined : body);
   });
   const wss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024, perMessageDeflate: false });
