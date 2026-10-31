@@ -103,6 +103,12 @@ progress::-webkit-progress-value { background: var(--green); border-radius: 8px;
 .transfer-meta:empty { display: none; }
 #retry { margin-top: 16px; }
 .queued-files { margin-top: 16px; }
+.queue-summary { margin: 0 0 8px; color: var(--muted); font-size: 14px; font-variant-numeric: tabular-nums; }
+.file-actions { display: flex; flex-shrink: 0; gap: 2px; }
+.text-button { min-height: 44px; min-width: 44px; padding: 8px; border: 0; border-radius: 6px; background: transparent; color: var(--orange); }
+.text-button:hover:not(:disabled) { background: #f2f2e9; }
+.text-button:disabled { color: var(--muted); }
+#cancel-note { margin-top: 4px; width: 100%; }
 summary { cursor: pointer; min-height: 44px; padding-block: 10px; }
 .file-list { max-height: 360px; overflow: auto; }
 .file-row { display: flex; align-items: center; gap: 10px; padding-block: 12px; border-top: 1px solid var(--line); }

@@ -1,6 +1,7 @@
 import { MAX_BYTES, MAX_FILES, CHUNK_BYTES, makeSecret, importSecret, encrypt, decrypt, encodeJSON, decodeJSON, toBase64, fromBase64, validateManifest } from './protocol.js';
 import { streamFile, TransferMeter, waitForDataChannel } from './transfer.js';
 import { FileTasks } from './file-tasks.js';
+import { prepareAdditions } from './handoff.js';
 
 const $ = id => document.getElementById(id);
 const isSender = location.pathname === '/';
@@ -13,6 +14,7 @@ let room = isSender ? '' : location.pathname.split('/')[2];
 let secret = isSender ? makeSecret() : location.hash.slice(1);
 let key, ws, peer, socketQueue = Promise.resolve(), preparing = false, ended = false;
 let accepted = false, previewTimer;
+let editingId = null;
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const size = bytes => bytes < 1024 ? `${bytes} B` : bytes < 1024 ** 2 ? `${(bytes / 1024).toFixed(1)} KB` : `${(bytes / 1024 ** 2).toFixed(1)} MB`;
 function status(title, detail, state = '') { $('status').textContent = title; $('status-detail').textContent = detail; $('status-dot').className = `status-dot ${state}`; updateMobileAction(); }
@@ -90,6 +92,8 @@ function updateMobileAction() {
     label = isSender ? 'Sending…' : 'Receiving…'; disabled = true;
     summary = $('transfer-speed').textContent;
     amount = `${size(peer.done)} / ${size(peer.total)}`;
+  } else if (isSender && peer?.failed && !peer.closed) {
+    label = 'Transfer paused'; disabled = true; hint = 'Ask the recipient to reconnect.';
   } else if (isSender) {
     action = navigator.share ? 'share' : 'copy';
     label = preparing ? 'Adding files…' : navigator.share ? 'Share link ↗' : 'Copy link ↗';
@@ -123,7 +127,7 @@ function abortIncoming(p) {
 function newPeer() {
   abortIncoming(peer);
   if (peer) { clearTimeout(peer.timer); peer.closed = true; peer.pc?.close(); for (const waiter of peer.waiters.values()) waiter.reject(new Error('The recipient disconnected.')); }
-  peer = { session: '', pc: null, dc: null, transport: '', tx: Promise.resolve(), rx: Promise.resolve(), outSeq: 0, inSeq: 0, candidates: [], ready: false, sent: new Set(), waiters: new Map(), closed: false, failed: false, sending: false, total: 0, done: 0 };
+  peer = { session: '', pc: null, dc: null, transport: '', tx: Promise.resolve(), rx: Promise.resolve(), outSeq: 0, inSeq: 0, candidates: [], ready: false, sent: new Set(), announced: new Set(), waiters: new Map(), closed: false, failed: false, sending: false, total: 0, done: 0 };
   return peer;
 }
 async function signal(value, p = peer) {
@@ -256,10 +260,10 @@ function waitFor(p, id) {
 }
 function resolveWait(p, id, value) { const waiter = p.waiters.get(id); if (waiter) { p.waiters.delete(id); waiter.resolve(value); } }
 async function onControl(p, message) {
-  if (message.type === 'ready' && isSender) { p.ready = true; pump(p).catch(fail); }
+  if (message.type === 'ready' && isSender) { p.ready = true; resumeSending(p); }
   else if (message.type === 'manifest' && !isSender) {
     const manifest = validateManifest(message.files, files);
-    files.splice(0, files.length, ...manifest.map(meta => ({ ...meta, state: received.has(meta.id) ? 'Received · verified' : 'Waiting…' })));
+    files.splice(0, files.length, ...manifest.map(meta => ({ ...meta, state: received.has(meta.id) ? received.get(meta.id).saved ? 'Saved to folder · verified' : 'Received · verified' : 'Waiting…' })));
     p.total = manifest.reduce((sum, file) => sum + file.size, 0); renderFiles(); startProgress(p);
     if (!manifest.length) status('Connected. Waiting for files.', 'The sender can add files or a note at any time.', 'active');
   } else if (message.type === 'start' && !isSender) {
@@ -300,13 +304,19 @@ async function onControl(p, message) {
     progress(p, true); $('receive-intro').hidden = files.length > 0;
   }
 }
+function resumeSending(p = peer) {
+  if (p?.ready) pump(p).catch(error => { if (p === peer && !p.closed) fail(error); });
+}
 async function pump(p) {
   if (!p.ready || p.sending || p.closed || p.failed || preparing) return;
   p.sending = true;
-  p.total = files.reduce((sum, file) => sum + file.size, 0); startProgress(p);
+  const batch = files.filter(file => file.id !== editingId);
+  let continueBatch = false;
+  for (const file of batch) p.announced.add(file.id);
+  p.total = batch.reduce((sum, file) => sum + file.size, 0); startProgress(p); renderFiles();
   try {
-    await sendControl(p, { type: 'manifest', files: files.map(({ id, name, size, sha256 }) => ({ id, name, size, sha256 })) });
-    for (const file of files) {
+    await sendControl(p, { type: 'manifest', files: batch.map(({ id, name, size, sha256 }) => ({ id, name, size, sha256 })) });
+    for (const file of batch) {
       if (p.sent.has(file.id)) continue;
       file.state = 'Sending…'; renderFiles(); status(`Sending ${file.name}`, 'Keep this tab open. The receiver is getting your file.', 'active');
       await sendControl(p, { type: 'start', id: file.id });
@@ -321,49 +331,76 @@ async function pump(p) {
       await sendControl(p, { type: 'end', id: file.id });
       await done; p.done = base + file.size; p.sent.add(file.id); file.state = 'Delivered · verified'; renderFiles();
     }
+    // Keep the recipient connected until additions selected during this batch are ready.
+    if (preparing || files.some(file => file.id !== editingId && !p.sent.has(file.id))) { continueBatch = !preparing; return; }
     await sendControl(p, { type: 'complete' });
     progress(p, true);
-    status(files.length ? 'All files sent' : 'Recipient connected', files.length ? 'You can add more or close this tab.' : 'Add files or a note to send them.', 'active');
-  } finally { p.sending = false; }
+    status(editingId ? 'Finish editing your note' : files.length ? 'All files sent' : 'Recipient connected', editingId ? 'Save or cancel the edit to send that note.' : files.length ? 'You can add more or close this tab.' : 'Add files or a note to send them.', 'active');
+  } finally {
+    p.sending = false;
+    if (continueBatch && p === peer && !p.closed && !p.failed && !preparing) resumeSending(p);
+  }
 }
-async function addFiles(incoming) {
-  if (preparing) { addFeedback('Still adding your files…'); return; }
-  if (peer?.sending) { addFeedback('Wait for this transfer to finish before adding more.'); return; }
+async function addFiles(incoming, { replaceId = null, noteText } = {}) {
+  if (preparing) { addFeedback('Still adding your files…'); return false; }
+  if (replaceId && !canEdit(files.find(file => file.id === replaceId))) { addFeedback('This note has already started sending. Add a new note instead.'); return false; }
   const firstAddition = files.length === 0;
-  const additions = [];
-  let duplicates = 0, total = files.reduce((sum, file) => sum + file.size, 0);
   preparing = true; notice(''); renderFiles();
   try {
-    for (const file of incoming) {
+    const { additions, duplicates } = await prepareAdditions(files.filter(file => file.id !== replaceId), incoming, file => {
       addFeedback(`Adding ${file.name}…`);
-      // Reject an oversized file before reading it into browser memory.
-      if (file.size > MAX_BYTES) throw new Error(`This file is ${size(file.size)}. The limit is ${size(MAX_BYTES)}.`);
-      const sha256 = await fileTasks.run('hash', { file }, { onProgress: done => addFeedback(`Adding ${file.name} · ${Math.round(done / file.size * 100)}%`) });
-      if ([...files, ...additions].some(item => item.name === file.name && item.size === file.size && item.sha256 === sha256)) { duplicates++; continue; }
-      const count = files.length + additions.length + 1;
-      if (count > MAX_FILES) throw new Error(`This handoff would contain ${count} files. The limit is ${MAX_FILES}.`);
-      total += file.size;
-      if (total > MAX_BYTES) throw new Error(`This handoff would total ${size(total)}. The limit is ${size(MAX_BYTES)}.`);
-      additions.push({ id: crypto.randomUUID(), file, name: file.name, size: file.size, sha256, state: 'Ready to send' });
+      return fileTasks.run('hash', { file }, { onProgress: done => addFeedback(`Adding ${file.name} · ${Math.round(done / file.size * 100)}%`) });
+    });
+    if (!additions.length) { addFeedback('Already added. Check the list below.'); return false; }
+    for (const file of additions) {
+      if (noteText !== undefined) file.noteText = noteText;
+      if (peer?.sending) file.state = 'Queued for next transfer';
     }
-    files.push(...additions);
-  } catch (error) { addFeedback(error.message); return; }
-  finally { preparing = false; renderFiles(); }
-  addFeedback(duplicates ? additions.length ? 'Skipped files already in this handoff.' : 'Already added. Check the list below.' : '');
-  if (!additions.length) return;
-  publishPreview();
-  if (!peer?.ready) {
-    status('Ready to send', 'They open the link and accept your files.', 'active');
-    $('lead').textContent = 'Files added. Copy the link to send them.';
-    highlightShare(firstAddition);
+    if (replaceId) {
+      files.splice(files.findIndex(file => file.id === replaceId), 1, ...additions);
+      resetNoteEditor();
+    } else files.push(...additions);
+    publishPreview();
+    addFeedback(peer?.sending ? 'Added. These files will send next.' : duplicates ? 'Skipped files already in this handoff.' : '');
+    if (!peer?.ready || peer.closed) {
+      status('Ready to send', 'They open the link and accept your files.', 'active');
+      $('lead').textContent = 'Files added. Copy the link to send them.';
+      highlightShare(firstAddition);
+    }
+    return true;
+  } catch (error) { addFeedback(error.message); return false; }
+  finally {
+    preparing = false; renderFiles();
+    resumeSending();
   }
-  if (peer?.ready) pump(peer).catch(fail);
+}
+function canEdit(file) { return !!file && !preparing && (!peer || peer.closed || !peer.announced.has(file.id)); }
+function resetNoteEditor() {
+  editingId = null; $('note').value = ''; $('add-note').textContent = 'Add note'; $('cancel-note').hidden = true;
+}
+function editNote(file) {
+  if (!canEdit(file)) return;
+  editingId = file.id; $('note').value = file.noteText;
+  $('add-note').textContent = 'Save note'; $('cancel-note').hidden = false;
+  selectInputTab($('note-tab')); renderFiles(); $('note').focus();
+}
+function removeFile(file) {
+  if (!canEdit(file)) return;
+  const index = files.indexOf(file); files.splice(index, 1);
+  if (editingId === file.id) resetNoteEditor();
+  publishPreview(); renderFiles();
+  if (!files.length) {
+    clearShareHighlight(); $('lead').textContent = 'Add them below. Share the link.';
+    status('Ready when you are', '');
+  }
+  const buttons = $('file-list').querySelectorAll('.file-remove');
+  (buttons[Math.min(index, buttons.length - 1)] || $('dropzone')).focus({ preventScroll: true });
 }
 function addFeedback(message) { $('add-feedback').textContent = message; $('add-feedback').hidden = !message; }
 function highlightShare(scroll = false) {
   $('share-card').classList.add('share-ready');
   $('share-title').textContent = 'Now share the link';
-  if (scroll && !$('copy-link').disabled) {
+  if (scroll && !$('copy-link').disabled && !matchMedia('(max-width: 759px)').matches) {
     $('copy-link').focus({ preventScroll: true });
     $('copy-link').scrollIntoView({ block: 'nearest', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
   }
@@ -381,7 +418,10 @@ function renderFiles() {
     $('dropzone').setAttribute('aria-label', preparing ? 'Adding files' : files.length ? 'Add more files' : 'Choose files');
     $('dropzone').setAttribute('aria-busy', String(preparing));
     $('dropzone').disabled = preparing; $('add-note').disabled = preparing;
+    $('cancel-note').disabled = preparing;
+    $('note').disabled = preparing;
   }
+  $('queue-summary').textContent = `${files.length} / ${MAX_FILES} files · ${size(files.reduce((sum, file) => sum + file.size, 0))} / ${size(MAX_BYTES)}`;
   $('download-all').textContent = received.size === 1 ? 'Save file ↓' : 'Save all files ↓';
   $('queued-files').hidden = files.length === 0;
   if (!isSender) $('receive-intro').hidden = files.length > 0;
@@ -391,8 +431,19 @@ function renderFiles() {
     const icon = document.createElement('span'); icon.className = 'file-icon'; icon.textContent = (file.name.split('.').pop() || 'FILE').slice(0, 4).toUpperCase();
     const info = document.createElement('div'); info.className = 'file-info';
     const name = document.createElement('span'); name.className = 'file-name'; name.textContent = file.name;
-    const detail = document.createElement('small'); detail.textContent = `${size(file.size)} · ${file.state}`;
+    const detail = document.createElement('small'); detail.textContent = `${size(file.size)} · ${file.id === editingId ? 'Editing note…' : file.state}`;
     info.append(name, detail); row.append(icon, info);
+    if (isSender) {
+      const actions = document.createElement('div'); actions.className = 'file-actions';
+      if (file.noteText !== undefined) {
+        const edit = document.createElement('button'); edit.className = 'text-button'; edit.textContent = 'Edit';
+        edit.setAttribute('aria-label', `Edit ${file.name}`); edit.disabled = !canEdit(file) || !!editingId; edit.onclick = () => editNote(file); actions.append(edit);
+      }
+      const remove = document.createElement('button'); remove.className = 'text-button file-remove'; remove.textContent = '×';
+      remove.setAttribute('aria-label', `Remove ${file.name}`); remove.disabled = !canEdit(file); remove.onclick = () => removeFile(file);
+      if (peer?.announced.has(file.id) && !peer.closed) actions.title = 'Already announced to the receiver. It cannot be changed during this connection.';
+      actions.append(remove); row.append(actions);
+    }
     if (!isSender && received.has(file.id)) {
       const saved = received.get(file.id); const link = document.createElement('a'); link.href = saved.url; link.download = safeName(file.name); link.textContent = 'Save ↓'; link.setAttribute('aria-label', `Save ${file.name}`); row.append(link);
     }
@@ -434,6 +485,7 @@ async function connect() {
       else if (msg.type === 'peer-left') {
         if (peer) { peer.closed = true; peer.pc?.close(); clearTimeout(peer.timer); for (const waiter of peer.waiters.values()) waiter.reject(new Error('The recipient disconnected.')); }
         status('The recipient has left.', 'Your link is still live. Someone else can open it now.');
+        renderFiles();
       } else if (msg.type === 'sender-left') {
         abortIncoming(peer);
         ended = true; if (peer) { peer.closed = true; peer.pc?.close(); clearTimeout(peer.timer); }
@@ -515,10 +567,11 @@ window.addEventListener('dragover', event => event.preventDefault());
 window.addEventListener('drop', event => event.preventDefault());
 $('add-note').onclick = async () => {
   const text = $('note').value.trim(); if (!text) { $('note').focus(); return; }
-  const count = files.filter(file => /^HANDOFF.*\.md$/i.test(file.name)).length;
-  const before = files.length; await addFiles([new File([text + '\n'], count ? `HANDOFF-${count + 1}.md` : 'HANDOFF.md', { type: 'text/markdown' })]);
-  if (files.length > before) $('note').value = '';
+  let name = editingId ? files.find(file => file.id === editingId).name : 'HANDOFF.md', n = 2;
+  if (!editingId) while (files.some(file => file.name === name)) name = `HANDOFF-${n++}.md`;
+  if (await addFiles([new File([text + '\n'], name, { type: 'text/markdown' })], { replaceId: editingId, noteText: text })) resetNoteEditor();
 };
+$('cancel-note').onclick = () => { resetNoteEditor(); renderFiles(); resumeSending(); };
 $('retry').onclick = () => {
   abortIncoming(peer);
   if (peer) { peer.closed = true; peer.pc?.close(); clearTimeout(peer.timer); }

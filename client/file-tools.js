@@ -38,7 +38,13 @@ export class IncomingFile {
       file.directory = directory;
       file.name = name;
       try {
-        file.handle = await directory.getFileHandle(name, { create: true });
+        // Ask the filesystem too: different Unicode names can alias on a local disk.
+        for (let number = 2; ; number++) {
+          try { await directory.getFileHandle(file.name); }
+          catch (error) { if (error.name === 'NotFoundError') break; throw error; }
+          file.name = `${number}-${name}`;
+        }
+        file.handle = await directory.getFileHandle(file.name, { create: true });
         file.writer = await file.handle.createWritable();
       } catch (error) { await file.abort(); throw error; }
     }

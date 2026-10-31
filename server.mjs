@@ -12,6 +12,7 @@ const assets = new Map([
   ['/protocol.js', ['protocol.js', 'text/javascript; charset=utf-8']],
   ['/transfer.js', ['transfer.js', 'text/javascript; charset=utf-8']],
   ['/file-tasks.js', ['file-tasks.js', 'text/javascript; charset=utf-8']],
+  ['/handoff.js', ['handoff.js', 'text/javascript; charset=utf-8']],
   ['/file-worker.js', ['file-worker.js', 'text/javascript; charset=utf-8']],
   ['/hashes-LICENSE.txt', ['hashes-LICENSE.txt', 'text/plain; charset=utf-8']],
   ['/style.css', ['style.css', 'text/css; charset=utf-8']],

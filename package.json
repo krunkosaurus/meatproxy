@@ -11,7 +11,7 @@
     "start": "node server.mjs",
     "build": "node ops/build-client.mjs && npm run build:worker && npm run build:brand",
     "test": "node --test test/*.test.mjs",
-    "check": "node --check server.mjs && node --check public/app.js && node --check public/transfer.js && node --check public/protocol.js && node --check public/receive.mjs && node --check public/file-tasks.js && node --check public/file-worker.js",
+    "check": "node --check server.mjs && node --check public/app.js && node --check public/transfer.js && node --check public/protocol.js && node --check public/receive.mjs && node --check public/file-tasks.js && node --check public/file-worker.js && node --check public/handoff.js",
     "build:brand": "node ops/build-brand.mjs",
     "build:worker": "node ops/build-worker.mjs"
   },
@@ -21,6 +21,7 @@
   "devDependencies": {
     "@noble/hashes": "2.4.0",
     "@resvg/resvg-js": "2.6.2",
-    "esbuild": "0.28.2"
+    "esbuild": "0.28.2",
+    "linkedom": "0.18.14"
   }
 }

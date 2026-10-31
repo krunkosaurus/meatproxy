@@ -31,11 +31,14 @@ test('browser receive verifies streamed blocks and retains a Blob, including emp
   }
 });
 
-function directoryFixture() {
+function directoryFixture(existing = []) {
   const events = [], parts = [];
+  const names = new Set(existing.map(name => name.normalize('NFC').toLowerCase()));
   const directory = {
-    getFileHandle: async name => {
-      events.push(['create', name]);
+    getFileHandle: async (name, { create = false } = {}) => {
+      const normalized = name.normalize('NFC').toLowerCase();
+      if (!create && !names.has(normalized)) throw new DOMException('Not found', 'NotFoundError');
+      if (create) { events.push(['create', name]); names.add(normalized); }
       return {
         createWritable: async () => ({
           write: async bytes => { events.push(['write', bytes.length]); parts.push(bytes.slice()); },
@@ -63,6 +66,14 @@ test('folder receive commits only after verification, with no retained payload p
   assert.deepEqual(events.at(-1), ['commit']);
   await file.abort();
   assert.ok(!events.some(([event]) => event === 'remove'), 'A verified file must survive cleanup');
+});
+
+test('filesystem name aliases cannot overwrite an earlier verified file', async () => {
+  const bytes = new TextEncoder().encode('new contents');
+  const { directory, events } = directoryFixture(['café.txt']);
+  const file = await IncomingFile.create(meta(bytes), directory, 'cafe\u0301.txt');
+  await file.append(bytes); await file.finish();
+  assert.deepEqual(events[0], ['create', '2-cafe\u0301.txt']);
 });
 
 test('truncated or corrupt folder receive aborts and removes only its own unfinished file', async () => {
