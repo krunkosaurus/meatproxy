@@ -205,7 +205,10 @@ async function pump(p) {
 async function addFiles(incoming) {
   if (preparing) { notice('A file is still being prepared. Try adding the next files in a moment.'); return; }
   if (peer?.sending) { notice('Wait for the current transfer to finish before adding more files.'); return; }
-  if (files.length + incoming.length > MAX_FILES || [...files, ...incoming].reduce((sum, file) => sum + file.size, 0) > MAX_BYTES) { notice('This prototype supports up to 100 files and 256 MB total per handoff.'); return; }
+  const count = files.length + incoming.length;
+  if (count > MAX_FILES) { notice(`This handoff would contain ${count} files. The limit is ${MAX_FILES}.`); return; }
+  const total = [...files, ...incoming].reduce((sum, file) => sum + file.size, 0);
+  if (total > MAX_BYTES) { notice(`This handoff would total ${size(total)}. The limit is ${size(MAX_BYTES)}.`); return; }
   preparing = true; notice(''); $('add-note').disabled = true;
   try {
     for (const file of incoming) {
@@ -220,6 +223,7 @@ async function addFiles(incoming) {
 }
 function renderFiles() {
   $('file-count').textContent = `${files.length} ${files.length === 1 ? 'file' : 'files'} added`;
+  $('download-all').textContent = received.size === 1 ? 'Save file ↓' : 'Save all files ↓';
   $('queued-files').hidden = files.length === 0;
   if (!isSender) $('receive-intro').hidden = files.length > 0;
   $('file-list').replaceChildren();
@@ -371,5 +375,11 @@ function zip(items) {
   return new Blob([...parts, ...directory, end], { type: 'application/zip' });
 }
 $('download-all').onclick = () => {
-  const url = URL.createObjectURL(zip([...received.values()])); const link = document.createElement('a'); link.href = url; link.download = 'meatproxy-handoff.zip'; link.click(); setTimeout(() => URL.revokeObjectURL(url), 60_000);
+  const items = [...received.values()];
+  const single = items.length === 1;
+  const url = single ? items[0].url : URL.createObjectURL(zip(items));
+  const link = document.createElement('a'); link.href = url;
+  link.download = single ? safeName(items[0].name) : 'meatproxy-handoff.zip';
+  link.click();
+  if (!single) setTimeout(() => URL.revokeObjectURL(url), 60_000);
 };

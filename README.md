@@ -6,11 +6,11 @@ Live at https://meatproxy.to. Files and notes move between two peers; the server
 
 1. Open the homepage, drop files or add a note, and copy the private link.
 2. Open that complete link in another browser or device. Reception starts automatically.
-3. Keep both tabs open until delivery is verified. Save individual files or the ZIP before closing the receiving tab.
+3. Keep both tabs open until delivery is verified. A single file downloads in its original format; multiple files can be saved together as a ZIP. Save them before closing the receiving tab.
 
 Notes become `HANDOFF.md`. The receiving page can copy text for an agent. Nothing received is executed automatically.
 
-The current prototype supports 100 files, 256 MiB total, and one connected recipient per link. A second recipient can connect after the first leaves. Links expire when the sender closes/reloads their page, the signaling connection ends, or 12 hours elapse. Sender file handles are held only in the page; refreshing cannot restore them. Files added after the initial delivery are sent while the receiver stays connected. During an active transfer, the UI asks the sender to wait before adding more files; these additions are not queued.
+The current prototype supports 100 files, 512 MiB total, and one connected recipient per link. A second recipient can connect after the first leaves. Links expire when the sender closes/reloads their page, the signaling connection ends, or 12 hours elapse. Sender file handles are held only in the page; refreshing cannot restore them. Files added after the initial delivery are sent while the receiver stays connected. During an active transfer, the UI asks the sender to wait before adding more files; these additions are not queued.
 
 The browser receiver holds completed files in memory. Large handoffs are best tested on desktop. Mobile backgrounding, device sleep, Safari, and Firefox have not yet been verified. This prototype restarts interrupted transfers rather than resuming partial files. Folder hierarchy is not preserved.
 

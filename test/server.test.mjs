@@ -102,9 +102,18 @@ test('application encryption rejects a wrong key, altered bytes, and another ses
 test('recipient rejects oversized and duplicate manifests before allocating file memory', () => {
   const file = { id: '12345678-1234-1234-1234-123456789abc', name: 'example.bin', size: 1, sha256: 'a'.repeat(64) };
   assert.throws(() => validateManifest([file, file]));
-  assert.throws(() => validateManifest([{ ...file, size: 257 * 1024 * 1024 }]));
+  assert.throws(() => validateManifest([{ ...file, size: 512 * 1024 * 1024 + 1 }]));
   assert.throws(() => validateManifest([{ ...file, size: -1 }]));
   assert.throws(() => validateManifest([], [file]));
   assert.throws(() => validateManifest([{ ...file, size: 2 }], [file]));
   assert.equal(validateManifest([{ ...file, size: 0 }]).length, 1);
+});
+
+test('video handoffs above 256 MiB are accepted within the 512 MiB aggregate limit', () => {
+  const mib = 1024 * 1024;
+  const video = { id: '12345678-1234-1234-1234-123456789abc', name: 'video.mp4', size: 283 * mib, sha256: 'a'.repeat(64) };
+  assert.equal(validateManifest([video])[0].size, 283 * mib);
+  assert.equal(validateManifest([{ ...video, size: 512 * mib }]).length, 1);
+  const extra = { ...video, id: '22345678-1234-1234-1234-123456789abc', name: 'second.mp4' };
+  assert.throws(() => validateManifest([video, extra]), /512 MB total limit/);
 });
