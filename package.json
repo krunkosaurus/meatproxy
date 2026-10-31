@@ -9,15 +9,18 @@
   },
   "scripts": {
     "start": "node server.mjs",
-    "build": "node ops/build-client.mjs && npm run build:brand",
+    "build": "node ops/build-client.mjs && npm run build:worker && npm run build:brand",
     "test": "node --test test/*.test.mjs",
-    "check": "node --check server.mjs && node --check public/app.js && node --check public/transfer.js && node --check public/protocol.js && node --check public/receive.mjs",
-    "build:brand": "node ops/build-brand.mjs"
+    "check": "node --check server.mjs && node --check public/app.js && node --check public/transfer.js && node --check public/protocol.js && node --check public/receive.mjs && node --check public/file-tasks.js && node --check public/file-worker.js",
+    "build:brand": "node ops/build-brand.mjs",
+    "build:worker": "node ops/build-worker.mjs"
   },
   "dependencies": {
     "ws": "8.22.0"
   },
   "devDependencies": {
-    "@resvg/resvg-js": "2.6.2"
+    "@noble/hashes": "2.4.0",
+    "@resvg/resvg-js": "2.6.2",
+    "esbuild": "0.28.2"
   }
 }

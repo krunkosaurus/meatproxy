@@ -1,10 +1,14 @@
-import { MAX_BYTES, MAX_FILES, CHUNK_BYTES, makeSecret, importSecret, encrypt, decrypt, encodeJSON, decodeJSON, toBase64, fromBase64, digest, validateManifest } from './protocol.js';
+import { MAX_BYTES, MAX_FILES, CHUNK_BYTES, makeSecret, importSecret, encrypt, decrypt, encodeJSON, decodeJSON, toBase64, fromBase64, validateManifest } from './protocol.js';
 import { streamFile, TransferMeter, waitForDataChannel } from './transfer.js';
+import { FileTasks } from './file-tasks.js';
 
 const $ = id => document.getElementById(id);
 const isSender = location.pathname === '/';
 const files = [];
 const received = new Map();
+const fileTasks = new FileTasks(), archiveTasks = new FileTasks();
+const RECEIVE_BLOCK_BYTES = CHUNK_BYTES * 16;
+let destinationParent, receiveFolder, folderNames = new Set(), saving = false;
 let room = isSender ? '' : location.pathname.split('/')[2];
 let secret = isSender ? makeSecret() : location.hash.slice(1);
 let key, ws, peer, socketQueue = Promise.resolve(), preparing = false, ended = false;
@@ -33,6 +37,8 @@ async function checkInvite() {
     state = preview.state;
     $('accept-files').disabled = state !== 'online';
     $('accept-files').hidden = state === 'offline';
+    $('accept-folder').hidden = state === 'offline' || !window.showDirectoryPicker;
+    $('accept-folder').disabled = state !== 'online';
     $('create-share').hidden = state !== 'offline';
     $('invite-help').textContent = state === 'offline' ? 'Start a new handoff with your own files.' : 'Receive from the sender’s browser. Both of you need to stay online.';
     $('invite-summary').textContent = state === 'offline' ? 'This link has expired.' : preview.count ? `${preview.count} ${preview.count === 1 ? 'file' : 'files'} · ${size(preview.totalBytes)}` : 'The sender is choosing files.';
@@ -44,6 +50,7 @@ async function checkInvite() {
   } catch {
     if (accepted) return;
     $('accept-files').disabled = true;
+    $('accept-folder').disabled = true;
     status('Checking the sender…', 'Could not reach Meatproxy. Trying again shortly.');
   }
   if (state !== 'offline') previewTimer = setTimeout(checkInvite, 10_000);
@@ -66,9 +73,17 @@ function fail(error) {
   const message = error instanceof Error ? error.message : String(error);
   notice(message); status('The handoff paused', message, 'error');
   if (peer) { peer.failed = true; for (const waiter of peer.waiters.values()) waiter.reject(new Error(message)); peer.waiters.clear(); }
+  abortIncoming(peer);
   $('retry').hidden = isSender || !accepted;
 }
+function abortIncoming(p) {
+  if (p?.incoming) {
+    fileTasks.run('abort', { token: p.incoming.token }).catch(() => {});
+    p.incoming = null;
+  }
+}
 function newPeer() {
+  abortIncoming(peer);
   if (peer) { clearTimeout(peer.timer); peer.closed = true; peer.pc?.close(); for (const waiter of peer.waiters.values()) waiter.reject(new Error('The recipient disconnected.')); }
   peer = { session: '', pc: null, dc: null, transport: '', tx: Promise.resolve(), rx: Promise.resolve(), outSeq: 0, inSeq: 0, candidates: [], ready: false, sent: new Set(), waiters: new Map(), closed: false, failed: false, sending: false, total: 0, done: 0 };
   return peer;
@@ -179,10 +194,19 @@ function receivePacket(p, raw) {
     else if (plain[4] === 1 && !isSender && p.incoming) {
       const data = plain.slice(5); const item = p.incoming;
       if (item.offset + data.length > item.meta.size) throw new Error('The incoming file exceeds its declared size.');
-      item.bytes.set(data, item.offset); item.offset += data.length; p.done += data.length;
-      if (item.offset % (CHUNK_BYTES * 16) === 0) await sendControl(p, { type: 'ack', id: item.meta.id, offset: item.offset });
+      item.parts.push(data); item.buffered += data.length; item.offset += data.length; p.done += data.length;
+      if (item.buffered >= RECEIVE_BLOCK_BYTES) await flushIncoming(item);
+      if (item.offset % RECEIVE_BLOCK_BYTES === 0) await sendControl(p, { type: 'ack', id: item.meta.id, offset: item.offset });
     } else throw new Error('An unexpected transfer packet arrived.');
-  }).catch(fail);
+  }).catch(error => { if (p === peer && !p.closed) fail(error); });
+}
+async function flushIncoming(item) {
+  if (!item.parts.length) return;
+  const bytes = new Uint8Array(item.parts.reduce((sum, part) => sum + part.length, 0));
+  let offset = 0;
+  for (const part of item.parts) { bytes.set(part, offset); offset += part.length; }
+  item.parts = []; item.buffered = 0;
+  await fileTasks.run('append', { token: item.token, bytes }, { transfer: [bytes.buffer] });
 }
 function waitFor(p, id) {
   let timer;
@@ -203,14 +227,27 @@ async function onControl(p, message) {
   } else if (message.type === 'start' && !isSender) {
     const meta = files.find(file => file.id === message.id);
     if (!meta || p.incoming || received.has(meta.id)) throw new Error('Unexpected file start.');
-    p.incoming = { meta, bytes: new Uint8Array(meta.size), offset: 0 }; meta.state = 'Receiving…'; renderFiles();
+    const token = `${p.session}:${meta.id}`;
+    const original = safeName(meta.name);
+    let name = original, n = 2;
+    while (folderNames.has(name.toLowerCase())) name = `${n++}-${original}`;
+    folderNames.add(name.toLowerCase());
+    p.incoming = { meta, token, parts: [], buffered: 0, offset: 0 };
+    await fileTasks.run('begin', { token, meta, directory: receiveFolder, name });
+    if (p !== peer || p.closed || p.failed) return;
+    meta.state = 'Receiving…'; renderFiles();
     status(`Receiving ${meta.name}`, 'Keep this tab open until the handoff is complete.', 'active');
   } else if (message.type === 'end' && !isSender) {
     const item = p.incoming;
-    if (!item || item.meta.id !== message.id || item.offset !== item.meta.size || await digest(item.bytes) !== item.meta.sha256) throw new Error('File verification failed. Please reconnect and try again.');
-    received.set(item.meta.id, { ...item.meta, bytes: item.bytes, url: URL.createObjectURL(new Blob([item.bytes], { type: 'application/octet-stream' })) });
-    item.meta.state = 'Received · verified'; p.incoming = null; renderFiles();
-    $('download-all').disabled = false; $('copy-agent').disabled = ![...received.values()].some(file => /\.(md|txt)$/i.test(file.name) && file.size <= 1024 * 1024);
+    if (!item || item.meta.id !== message.id) throw new Error('Unexpected file completion.');
+    await flushIncoming(item);
+    const result = await fileTasks.run('finish', { token: item.token });
+    if (p !== peer || p.closed || p.failed) return;
+    const note = /\.(md|txt)$/i.test(item.meta.name) && item.meta.size <= 1024 * 1024 ? await result.blob.text() : null;
+    if (p !== peer || p.closed || p.failed) return;
+    received.set(item.meta.id, { ...item.meta, ...result, note, url: URL.createObjectURL(result.blob) });
+    item.meta.state = result.saved ? 'Saved to folder · verified' : 'Received · verified'; p.incoming = null; renderFiles();
+    $('download-all').disabled = saving; $('copy-agent').disabled = ![...received.values()].some(file => /\.(md|txt)$/i.test(file.name) && file.size <= 1024 * 1024);
     await sendControl(p, { type: 'received', id: item.meta.id });
   } else if (message.type === 'ack' && isSender) resolveWait(p, `ack:${message.id}:${message.offset}`);
   else if (message.type === 'received' && isSender) resolveWait(p, `done:${message.id}`);
@@ -219,8 +256,8 @@ async function onControl(p, message) {
     status(files.length ? 'All files received' : 'Waiting for files', files.length ? 'Every file verified.' : 'The sender can add files or a note.', 'active');
     if (files.length) {
       $('headline').textContent = 'Your files are here.';
-      $('lead').textContent = 'Save them below or copy the notes.';
-      $('keep-open-text').textContent = 'Save your files before closing this tab.';
+      $('lead').textContent = receiveFolder ? `Saved in ${receiveFolder.name}.` : 'Save them below or copy the notes.';
+      $('keep-open-text').textContent = receiveFolder ? 'Your files are saved and verified.' : 'Save your files before closing this tab.';
     }
     progress(p, true); $('receive-intro').hidden = files.length > 0;
   }
@@ -263,7 +300,7 @@ async function addFiles(incoming) {
       addFeedback(`Adding ${file.name}…`);
       // Reject an oversized file before reading it into browser memory.
       if (file.size > MAX_BYTES) throw new Error(`This file is ${size(file.size)}. The limit is ${size(MAX_BYTES)}.`);
-      const sha256 = await digest(await file.arrayBuffer());
+      const sha256 = await fileTasks.run('hash', { file }, { onProgress: done => addFeedback(`Adding ${file.name} · ${Math.round(done / file.size * 100)}%`) });
       if ([...files, ...additions].some(item => item.name === file.name && item.size === file.size && item.sha256 === sha256)) { duplicates++; continue; }
       const count = files.length + additions.length + 1;
       if (count > MAX_FILES) throw new Error(`This handoff would contain ${count} files. The limit is ${MAX_FILES}.`);
@@ -323,13 +360,17 @@ function renderFiles() {
     }
     $('file-list').append(row);
     if (!isSender && received.has(file.id) && /^HANDOFF.*\.md$/i.test(file.name) && file.size < 200_000) {
-      const preview = document.createElement('pre'); preview.className = 'note-preview'; preview.textContent = new TextDecoder().decode(received.get(file.id).bytes); $('file-list').append(preview);
+      const preview = document.createElement('pre'); preview.className = 'note-preview'; preview.textContent = received.get(file.id).note; $('file-list').append(preview);
     }
   }
 }
 function safeName(name) { return name.replace(/[\\/\x00-\x1f\x7f]/g, '_').replace(/^\.+/, '_') || 'file'; }
 async function connect() {
   ended = false; $('retry').hidden = true; notice('');
+  if (!isSender && destinationParent) {
+    receiveFolder = await destinationParent.getDirectoryHandle(`meatproxy-${crypto.randomUUID()}`, { create: true });
+    folderNames = new Set();
+  }
   ws = new WebSocket(`${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/socket`); ws.binaryType = 'arraybuffer';
   ws.onopen = () => packet(isSender ? { type: 'create' } : { type: 'join', room });
   ws.onmessage = event => {
@@ -355,6 +396,7 @@ async function connect() {
         if (peer) { peer.closed = true; peer.pc?.close(); clearTimeout(peer.timer); for (const waiter of peer.waiters.values()) waiter.reject(new Error('The recipient disconnected.')); }
         status('The recipient has left.', 'Your link is still live. Someone else can open it now.');
       } else if (msg.type === 'sender-left') {
+        abortIncoming(peer);
         ended = true; if (peer) { peer.closed = true; peer.pc?.close(); clearTimeout(peer.timer); }
         status('The sender has left.', received.size ? 'Your received files are still here. Save them before closing this tab.' : 'Ask the sender for a fresh link.');
       }
@@ -364,7 +406,8 @@ async function connect() {
   ws.onclose = () => {
     if (!ended) {
       if (peer?.transport === 'direct' && peer.dc?.readyState === 'open') { notice('The link service disconnected. Your current direct transfer can continue, but new recipients need a fresh link.'); return; }
-      if (peer) peer.progressActive = false;
+      if (peer) { peer.progressActive = false; peer.closed = true; }
+      abortIncoming(peer);
       status('Connection closed', isSender ? 'Start a new handoff to make a fresh link.' : 'Save any completed files, then reconnect.', 'error');
       $('retry').hidden = isSender;
     }
@@ -410,6 +453,12 @@ $('accept-files').onclick = () => {
   status('Connecting…', 'Starting your encrypted transfer.');
   connect().catch(fail);
 };
+$('accept-folder').onclick = async () => {
+  try {
+    destinationParent = await window.showDirectoryPicker({ mode: 'readwrite', id: 'meatproxy-receive' });
+    $('accept-files').click();
+  } catch (error) { if (error.name !== 'AbortError') notice(`Could not open that folder: ${error.message}`); }
+};
 $('file-input').onchange = event => { addFiles([...event.target.files]); event.target.value = ''; };
 for (const name of ['dragenter', 'dragover']) $('dropzone').addEventListener(name, event => { event.preventDefault(); $('dropzone').classList.add('dragging'); });
 for (const name of ['dragleave', 'drop']) $('dropzone').addEventListener(name, event => { event.preventDefault(); $('dropzone').classList.remove('dragging'); });
@@ -423,6 +472,7 @@ $('add-note').onclick = async () => {
   if (files.length > before) $('note').value = '';
 };
 $('retry').onclick = () => {
+  abortIncoming(peer);
   if (peer) { peer.closed = true; peer.pc?.close(); clearTimeout(peer.timer); }
   if (ws) { ws.onclose = null; ws.close(); }
   for (const item of received.values()) URL.revokeObjectURL(item.url);
@@ -434,11 +484,11 @@ $('retry').onclick = () => {
 };
 $('copy-agent').onclick = () => {
   const notes = [...received.values()].filter(file => /\.(md|txt)$/i.test(file.name) && file.size <= 1024 * 1024);
-  const text = notes.map(file => `# ${file.name}\n\n${new TextDecoder().decode(file.bytes)}`).join('\n\n---\n\n');
+  const text = notes.map(file => `# ${file.name}\n\n${file.note}`).join('\n\n---\n\n');
   copy(text, $('copy-agent'), 'Copy notes');
 };
 window.addEventListener('beforeunload', event => {
-  if ((isSender && files.length) || (!isSender && received.size)) { event.preventDefault(); event.returnValue = ''; }
+  if ((isSender && files.length) || (!isSender && (peer?.incoming || [...received.values()].some(file => !file.saved)))) { event.preventDefault(); event.returnValue = ''; }
 });
 if (!isSender) {
   document.body.classList.add('receiving');
@@ -458,32 +508,22 @@ try {
   else { status('Checking the sender…', ''); await checkInvite(); }
 } catch (error) { fail(error); }
 
-// A stored ZIP keeps arbitrary file bytes intact and avoids third-party scripts.
-const crcTable = Array.from({ length: 256 }, (_, i) => { let c = i; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ c >>> 1 : c >>> 1; return c >>> 0; });
-function crc32(bytes) { let c = 0xffffffff; for (const byte of bytes) c = crcTable[(c ^ byte) & 255] ^ c >>> 8; return (c ^ 0xffffffff) >>> 0; }
-function zip(items) {
-  const parts = [], directory = []; let offset = 0;
-  const names = new Set();
-  for (const item of items) {
-    let name = safeName(item.name); let n = 2; const original = name;
-    while (names.has(name)) name = `${n++}-${original}`; names.add(name);
-    const filename = new TextEncoder().encode(name); const crc = crc32(item.bytes);
-    const local = new Uint8Array(30 + filename.length); const l = new DataView(local.buffer);
-    l.setUint32(0, 0x04034b50, true); l.setUint16(4, 20, true); l.setUint16(6, 0x800, true); l.setUint32(14, crc, true); l.setUint32(18, item.size, true); l.setUint32(22, item.size, true); l.setUint16(26, filename.length, true); local.set(filename, 30);
-    const central = new Uint8Array(46 + filename.length); const c = new DataView(central.buffer);
-    c.setUint32(0, 0x02014b50, true); c.setUint16(4, 20, true); c.setUint16(6, 20, true); c.setUint16(8, 0x800, true); c.setUint32(16, crc, true); c.setUint32(20, item.size, true); c.setUint32(24, item.size, true); c.setUint16(28, filename.length, true); c.setUint32(42, offset, true); central.set(filename, 46);
-    parts.push(local, item.bytes); directory.push(central); offset += local.length + item.size;
-  }
-  const length = directory.reduce((sum, part) => sum + part.length, 0); const end = new Uint8Array(22); const e = new DataView(end.buffer);
-  e.setUint32(0, 0x06054b50, true); e.setUint16(8, items.length, true); e.setUint16(10, items.length, true); e.setUint32(12, length, true); e.setUint32(16, offset, true);
-  return new Blob([...parts, ...directory, end], { type: 'application/zip' });
-}
-$('download-all').onclick = () => {
-  const items = [...received.values()];
-  const single = items.length === 1;
-  const url = single ? items[0].url : URL.createObjectURL(zip(items));
-  const link = document.createElement('a'); link.href = url;
-  link.download = single ? safeName(items[0].name) : 'meatproxy-handoff.zip';
-  link.click();
-  if (!single) setTimeout(() => URL.revokeObjectURL(url), 60_000);
+$('download-all').onclick = async () => {
+  if (saving) return;
+  const items = [...received.values()], single = items.length === 1;
+  const total = items.reduce((sum, item) => sum + item.size, 0);
+  saving = true; $('download-all').disabled = true;
+  $('save-feedback').hidden = false;
+  $('save-feedback').textContent = single ? 'Starting download…' : 'Preparing ZIP…';
+  try {
+    const url = single ? items[0].url : URL.createObjectURL(await archiveTasks.run('zip', {
+      items: items.map(({ name, blob }) => ({ name, blob })),
+    }, { onProgress: done => { $('save-feedback').textContent = `Preparing ZIP · ${Math.round(done / total * 100)}%`; } }));
+    const link = document.createElement('a'); link.href = url;
+    link.download = single ? safeName(items[0].name) : 'meatproxy-handoff.zip';
+    link.click();
+    if (!single) setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    $('save-feedback').textContent = 'Download started. Check your browser’s downloads.';
+  } catch (error) { $('save-feedback').textContent = `Could not prepare the download: ${error.message}`; }
+  finally { saving = false; $('download-all').disabled = received.size === 0; }
 };
