@@ -486,12 +486,14 @@ async function connect() {
     }).catch(fail);
   };
   ws.onerror = () => fail(new Error('Could not reach Meatproxy. Check your connection and try again.'));
-  ws.onclose = () => {
+  ws.onclose = event => {
     if (!ended) {
       if (peer?.transport === 'direct' && peer.dc?.readyState === 'open') { notice('The link service disconnected. Your current direct transfer can continue, but new recipients need a fresh link.'); return; }
       if (peer) { peer.progressActive = false; peer.closed = true; }
       abortIncoming(peer);
-      status('Connection closed', isSender ? 'Start a new handoff to make a fresh link.' : 'Save any completed files, then reconnect.', 'error');
+      // The server explains closes it initiates, such as relay limits.
+      const advice = isSender ? 'Start a new handoff to make a fresh link.' : 'Save any completed files, then reconnect.';
+      status('Connection closed', event.reason ? `${event.reason}. ${advice}` : advice, 'error');
       $('retry').hidden = isSender;
     }
   };

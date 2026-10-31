@@ -12,16 +12,17 @@ import WebSocket from 'ws';
 import { createApp, fingerprint, securityHeaders } from '../server.mjs';
 import { makeSecret, importSecret, encrypt, decrypt, validateManifest } from '../public/protocol.js';
 
-async function setup(t) {
-  const app = createApp({ origin: 'https://meatproxy.to' });
+async function setup(t, options = {}) {
+  const app = createApp({ origin: 'https://meatproxy.to', ...options });
   app.server.listen(0, '127.0.0.1'); await once(app.server, 'listening');
   t.after(() => app.close());
   const url = `ws://127.0.0.1:${app.server.address().port}/socket`;
-  const connect = async () => { const ws = new WebSocket(url, { origin: 'https://meatproxy.to' }); await once(ws, 'open'); return ws; };
+  // In production, Nginx sets X-Real-IP to the client's address.
+  const connect = async address => { const ws = new WebSocket(url, { origin: 'https://meatproxy.to', headers: address ? { 'X-Real-IP': address } : {} }); await once(ws, 'open'); return ws; };
   return { app, connect, url };
 }
 const message = async ws => JSON.parse((await once(ws, 'message'))[0].toString());
-async function create(connect) { const owner = await connect(); const response = message(owner); owner.send(JSON.stringify({ type: 'create' })); return { owner, room: (await response).room }; }
+async function create(connect, address) { const owner = await connect(address); const response = message(owner); owner.send(JSON.stringify({ type: 'create' })); return { owner, room: (await response).room }; }
 async function publish(owner, preview) {
   const processed = once(owner, 'pong');
   owner.send(JSON.stringify({ type: 'preview', ...preview })); owner.ping(); await processed;
@@ -417,6 +418,70 @@ test('the liveness check drops a stalled receiver but keeps the sender the relay
   assert.equal((await left).type, 'peer-left');
   await publish(owner, { count: 0, totalBytes: 0, names: [] });
   assert.equal(owner.readyState, WebSocket.OPEN);
+});
+
+// The page enforces the handoff limits; these limits stop a modified client using the relay as an open pipe.
+async function limitedPair(connect, senderAddress, receiverAddress) {
+  const { owner, room } = await create(connect, senderAddress);
+  const receiver = await connect(receiverAddress); const joined = message(receiver); const ownerJoined = message(owner);
+  receiver.send(JSON.stringify({ type: 'join', room }));
+  await joined; await ownerJoined;
+  owner.send(JSON.stringify({ type: 'signal', payload: 'relay' })); await message(receiver);
+  return { owner, receiver };
+}
+const closeOf = async ws => { const [code, reason] = await once(ws, 'close'); return `${code} ${reason}`; };
+const relayedUntilClosed = async (from, to, sizes) => {
+  let received = 0; to.on('message', (data, binary) => { if (binary) received += data.length; });
+  const closed = closeOf(from);
+  for (const size of sizes) from.send(Buffer.alloc(size));
+  return { closed: await closed, received: () => received };
+};
+
+test('one receiver connection relays at most one handoff, and acknowledgement-sized traffic back', { timeout: 10000 }, async t => {
+  const { connect } = await setup(t, { limits: { toReceiver: 100_000, toSender: 1_000 } });
+  const forward = await limitedPair(connect);
+  const sent = await relayedUntilClosed(forward.owner, forward.receiver, [60_000, 40_000, 1]);
+  assert.match(sent.closed, /^1008 .*limit/);
+  await until(() => sent.received() === 100_000, 'the bytes within the limit');
+  const back = await limitedPair(connect);
+  assert.match((await relayedUntilClosed(back.receiver, back.owner, [600, 400, 1])).closed, /^1008 .*limit/);
+});
+
+test('signals are limited to what connection setup needs', { timeout: 10000 }, async t => {
+  const { connect } = await setup(t, { limits: { signals: 10_000 } });
+  const { receiver } = await limitedPair(connect);
+  const closed = closeOf(receiver);
+  for (let i = 0; i < 3; i++) receiver.send(JSON.stringify({ type: 'signal', payload: 'x'.repeat(4_000) }));
+  assert.match(await closed, /^1008 .*limit/);
+});
+
+test('each address has a daily relay quota, and everyone shares a daily relay budget', { timeout: 10000 }, async t => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.UTC(2026, 9, 31, 12) });
+  const { connect } = await setup(t, { limits: { perAddressDaily: 100_000, daily: 150_000 } });
+  const a = await limitedPair(connect, '203.0.113.1', '203.0.113.9');
+  assert.match((await relayedUntilClosed(a.owner, a.receiver, [60_000, 60_000])).closed, /^1013 .*daily/);
+  const b = await limitedPair(connect, '203.0.113.2', '203.0.113.9');
+  const shared = await relayedUntilClosed(b.owner, b.receiver, [50_000, 50_000]);
+  assert.match(shared.closed, /^1013 .*daily/);
+  assert.equal(shared.received(), 50_000, 'The second address used the rest of the shared budget');
+  t.mock.timers.tick(12 * 60 * 60 * 1000); // The next UTC day starts with fresh budgets.
+  const c = await limitedPair(connect, '203.0.113.1', '203.0.113.9');
+  let received = 0; c.receiver.on('message', (data, binary) => { if (binary) received += data.length; });
+  c.owner.send(Buffer.alloc(60_000));
+  await until(() => received === 60_000, 'relay on the next day');
+});
+
+test('each address may hold a few connections, and an IPv6 /64 counts as one address', { timeout: 10000 }, async t => {
+  const { connect } = await setup(t, { maxClientsPerAddress: 2 });
+  const refused = async address => closeOf(await connect(address));
+  const held = [await connect('2001:db8:1:2::1'), await connect('2001:db8:1:2:abcd::5')];
+  assert.match(await refused('2001:db8:1:2:ffff:ffff:ffff:ffff'), /^1013 .*connections/);
+  const other = await connect('2001:db8:1:3::1'); // Another /64.
+  const v4 = [await connect('198.51.100.7'), await connect('::ffff:198.51.100.7')];
+  assert.match(await refused('198.51.100.7'), /^1013 .*connections/);
+  held[0].close(); await once(held[0], 'close'); await delay(50);
+  const again = await connect('2001:db8:1:2::9');
+  for (const ws of [held[1], other, ...v4, again]) assert.equal(ws.readyState, WebSocket.OPEN);
 });
 
 test('cross-origin sockets are refused and malformed messages do not crash the server', async t => {

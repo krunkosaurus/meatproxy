@@ -44,7 +44,7 @@ parentPort.on('message', async ({ id, command, ...args }) => {
   try {
     let result;
     if (command === 'snapshot') result = {
-      link: $('share-link').value, status: $('status').textContent, notice: $('notice').textContent,
+      link: $('share-link').value, status: $('status').textContent, detail: $('status-detail').textContent, notice: $('notice').textContent,
       feedback: $('add-feedback').textContent, summary: $('queue-summary').textContent,
       mobile: { label: $('mobile-action').textContent, disabled: $('mobile-action').disabled, action: $('mobile-action').dataset.action },
       rows: [...document.querySelectorAll('.file-row')].map(row => ({

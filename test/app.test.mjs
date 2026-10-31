@@ -38,8 +38,8 @@ async function page(t, url, options = {}) {
   } };
 }
 
-async function server(t) {
-  const app = createApp();
+async function server(t, options) {
+  const app = createApp(options);
   await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve));
   t.after(() => app.close());
   return `http://127.0.0.1:${app.server.address().port}/`;
@@ -93,6 +93,19 @@ test('actual browser relay locks announced files, queues additions before comple
   await receiver.run('click', { label: 'Save payload.bin' });
   assert.equal((await receiver.run('downloads'))[1].sha256, downloads[0].entries[0].sha256);
   assert.equal((await receiver.run('snapshot')).mobile.action, 'save');
+});
+
+test('a sender closed by a relay limit is told why', { timeout: 20000 }, async t => {
+  const sender = await page(t, await server(t, { limits: { toReceiver: 300_000 } }));
+  await sender.run('add', { files: [{ name: 'payload.bin', size: 1024 * 1024 }] });
+  const ready = await sender.until(s => s.rows.length === 1 && s.link.startsWith('http'));
+  const receiver = await page(t, ready.link);
+  await receiver.until(s => s.status === 'Sender online');
+  await receiver.run('click', { element: 'accept-files' });
+  let snapshot;
+  for (let attempt = 0; attempt < 300 && snapshot?.status !== 'Connection closed'; attempt++) { await delay(20); snapshot = await sender.run('snapshot'); }
+  assert.equal(snapshot.status, 'Connection closed');
+  assert.match(snapshot.detail, /^Relay limit reached for this handoff\. Start a new handoff/);
 });
 
 test('Node receiver stays connected while a queued addition is still being hashed', { timeout: 20000 }, async t => {

@@ -62,6 +62,24 @@ const roomLifetime = 12 * 60 * 60 * 1000;
 // Above either limit, the relay stops reading from a sender until its receiver catches up.
 // Each queued message costs heap however small it is, so messages are counted as well as bytes.
 const relayBufferBytes = 512 * 1024, relayBufferMessages = 256;
+// The page enforces the handoff limits; the relay enforces them too, so a modified client cannot use
+// it as an open pipe. Daily counts reset at midnight UTC and when the service restarts.
+const relayLimits = {
+  toReceiver: MAX_BYTES + 64 * 1024 * 1024, // Per receiver connection: one handoff plus encryption and control.
+  toSender: 8 * 1024 * 1024, // Per receiver connection: acknowledgements and control messages.
+  signals: 1024 * 1024, // Per socket: connection setup.
+  perAddressDaily: 4 * 1024 ** 3,
+  daily: 50 * 1024 ** 3,
+};
+// IPv6 users typically control a whole /64, so it counts as one address.
+function addressKey(address = '') {
+  const v4 = address.match(/^(?:::ffff:)?(\d+\.\d+\.\d+\.\d+)$/i);
+  if (v4) return v4[1];
+  const [head, tail = ''] = address.split('::');
+  const left = head ? head.split(':') : [], right = tail ? tail.split(':') : [];
+  const groups = [...left, ...Array(Math.max(0, 8 - left.length - right.length)).fill('0'), ...right];
+  return `${groups.slice(0, 4).map(group => parseInt(group, 16).toString(16)).join(':')}::/64`;
+}
 const escapeHTML = value => value.replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
 
 function previewOf(room) {
@@ -89,8 +107,21 @@ function renderPreview(html, preview, url) {
     .replace(/(<meta (?:name|property)="([^"]+)" content=")[^"]*(")/g, (tag, start, name, end) => name in values ? start + escapeHTML(values[name]) + end : tag);
 }
 
-export function createApp({ origin = process.env.PUBLIC_ORIGIN, maxClients = 200 } = {}) {
+export function createApp({ origin = process.env.PUBLIC_ORIGIN, maxClients = 200, maxClientsPerAddress = 16, limits = {} } = {}) {
   const rooms = new Map();
+  const limit = { ...relayLimits, ...limits };
+  const connections = new Map(), usage = { day: -1, total: 0, byAddress: new Map() };
+  // Returns the close code and reason when relaying these bytes would pass a limit.
+  const refuseRelay = (ws, peer, bytes) => {
+    const day = Math.floor(Date.now() / 86_400_000);
+    if (usage.day !== day) Object.assign(usage, { day, total: 0, byAddress: new Map() });
+    const [receiver, direction] = ws.owner ? [peer, 'toReceiver'] : [ws, 'toSender'];
+    const used = usage.byAddress.get(ws.address) || 0;
+    if (receiver[direction] + bytes > limit[direction]) return [1008, 'Relay limit reached for this handoff'];
+    if (used + bytes > limit.perAddressDaily) return [1013, 'Your network reached its daily relay limit; try again tomorrow'];
+    if (usage.total + bytes > limit.daily) return [1013, 'The relay reached its daily limit; try again tomorrow'];
+    receiver[direction] += bytes; usage.byAddress.set(ws.address, used + bytes); usage.total += bytes;
+  };
   // Socket origins are compared to this exact string, so accept only a bare http(s) origin.
   const publicOrigin = new URL(origin || 'https://meatproxy.to');
   if (!/^https?:$/.test(publicOrigin.protocol) || (origin && publicOrigin.origin !== origin)) throw new Error(`PUBLIC_ORIGIN must be an origin such as https://meatproxy.to, not ${origin}`);
@@ -133,13 +164,21 @@ export function createApp({ origin = process.env.PUBLIC_ORIGIN, maxClients = 200
     if (req.url !== '/socket' || (requestOrigin && requestOrigin !== allowedOrigin) || wss.clients.size >= maxClients) {
       socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n'); return;
     }
-    wss.handleUpgrade(req, socket, head, ws => wss.emit('connection', ws));
+    wss.handleUpgrade(req, socket, head, ws => {
+      // Nginx sets X-Real-IP to the client's address; without it, every client shares one address.
+      ws.address = addressKey(req.headers['x-real-ip'] || req.socket.remoteAddress);
+      wss.emit('connection', ws);
+    });
   });
   wss.on('connection', ws => {
-    ws.alive = true; ws.held = false; ws.relayQueue = 0;
+    const held = (connections.get(ws.address) || 0) + 1;
+    connections.set(ws.address, held);
+    ws.once('close', () => { const left = connections.get(ws.address) - 1; if (left) connections.set(ws.address, left); else connections.delete(ws.address); });
+    ws.on('error', () => {}); // Errors are followed by close; close performs room cleanup.
+    if (held > maxClientsPerAddress) { ws.close(1013, 'Too many connections from your network; close other Meatproxy tabs and try again'); return; }
+    ws.alive = true; ws.held = false; ws.relayQueue = 0; ws.signalBytes = 0; ws.toReceiver = 0; ws.toSender = 0;
     ws.on('pong', () => { ws.alive = true; });
     const setupTimer = setTimeout(() => { if (!ws.room) ws.close(1008, 'Join a handoff first'); }, 10_000);
-    ws.on('error', () => {}); // Errors are followed by close; close performs room cleanup.
     ws.on('message', (data, binary) => {
       ws.alive = true; // A slow upload can hold the pong behind megabytes of file data.
       if (binary) {
@@ -147,6 +186,8 @@ export function createApp({ origin = process.env.PUBLIC_ORIGIN, maxClients = 200
         // After a receiver leaves, the sender's queued data for it can still be arriving.
         // The sender's first message for the next receiver is a signal, which follows all of it.
         if (!peer || peer.readyState !== WebSocket.OPEN || (ws.owner && ws.room.previousSession)) return;
+        const refusal = refuseRelay(ws, peer, data.length);
+        if (refusal) { ws.close(...refusal); return; }
         // Pausing lets TCP slow the sender's browser. Write callbacks also fire, with an
         // error, when the receiver's socket is destroyed, so a departed receiver releases it.
         const backlogged = () => peer.bufferedAmount > relayBufferBytes || peer.relayQueue > relayBufferMessages;
@@ -176,6 +217,8 @@ export function createApp({ origin = process.env.PUBLIC_ORIGIN, maxClients = 200
         }
         ws.room.preview = { count: msg.count, totalBytes: msg.totalBytes, names: msg.names.map(name => name.replace(/[\x00-\x1f\x7f]/g, '').slice(0, 180)) };
       } else if (msg.type === 'signal' && ws.room && typeof msg.payload === 'string' && msg.payload.length <= 60_000) {
+        ws.signalBytes += msg.payload.length;
+        if (ws.signalBytes > limit.signals) { ws.close(1008, 'Signal limit reached for this connection'); return; }
         const peer = ws.owner ? ws.room.guest : ws.room.owner;
         // Relies on the sender sending no signals after its first relay data in a session (app.js setupRTC).
         if (ws.owner) ws.room.previousSession = false;
