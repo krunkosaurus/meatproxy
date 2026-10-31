@@ -15,7 +15,7 @@ let key, ws, peer, socketQueue = Promise.resolve(), preparing = false, ended = f
 let accepted = false, previewTimer;
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const size = bytes => bytes < 1024 ? `${bytes} B` : bytes < 1024 ** 2 ? `${(bytes / 1024).toFixed(1)} KB` : `${(bytes / 1024 ** 2).toFixed(1)} MB`;
-function status(title, detail, state = '') { $('status').textContent = title; $('status-detail').textContent = detail; $('status-dot').className = `status-dot ${state}`; }
+function status(title, detail, state = '') { $('status').textContent = title; $('status-detail').textContent = detail; $('status-dot').className = `status-dot ${state}`; updateMobileAction(); }
 function notice(message) { $('notice').textContent = message; $('notice').hidden = !message; }
 function packet(value) { if (ws?.readyState !== WebSocket.OPEN) throw new Error('The connection closed. Start a new handoff.'); ws.send(JSON.stringify(value)); }
 function updateCommand() {
@@ -67,6 +67,7 @@ function progress(p, finished = false) {
   const eta = stats.remaining < 60 ? `${stats.remaining} s` : stats.remaining < 3600 ? `${Math.ceil(stats.remaining / 60)} min` : `${Math.ceil(stats.remaining / 3600)} hr`;
   $('transfer-speed').textContent = finished ? `${size(stats.average)}/s average · Complete` : done === total ? 'Verifying files…' : stats.rate === null ? 'Estimating speed and time…' : stats.rate === 0 ? '0 B/s · Waiting for data…' : `${size(stats.rate)}/s · About ${eta} left`;
   if (finished) p.progressActive = false;
+  updateMobileAction();
 }
 setInterval(() => { if (peer?.progressActive && !peer.closed && !peer.failed) progress(peer); }, 500);
 function fail(error) {
@@ -75,6 +76,43 @@ function fail(error) {
   if (peer) { peer.failed = true; for (const waiter of peer.waiters.values()) waiter.reject(new Error(message)); peer.waiters.clear(); }
   abortIncoming(peer);
   $('retry').hidden = isSender || !accepted;
+  updateMobileAction();
+}
+function updateMobileAction() {
+  const bar = $('mobile-actions'), button = $('mobile-action');
+  bar.hidden = isSender && !files.length && !preparing;
+  let action, label, hint = $('keep-open-text').textContent, disabled = false;
+  let summary = $('status').textContent, amount = '';
+  const active = peer?.progressActive && !peer.closed && !peer.failed && peer.total > 0;
+  $('mobile-progress').hidden = !active;
+  if (active) {
+    $('mobile-progress').value = $('progress').value;
+    label = isSender ? 'Sending…' : 'Receiving…'; disabled = true;
+    summary = $('transfer-speed').textContent;
+    amount = `${size(peer.done)} / ${size(peer.total)}`;
+  } else if (isSender) {
+    action = navigator.share ? 'share' : 'copy';
+    label = preparing ? 'Adding files…' : navigator.share ? 'Share link ↗' : 'Copy link ↗';
+    disabled = preparing || $('copy-link').disabled || ws?.readyState !== WebSocket.OPEN;
+    summary = `${files.length} ${files.length === 1 ? 'file' : 'files'} ready`;
+    amount = size(files.reduce((sum, file) => sum + file.size, 0));
+  } else if (!accepted) {
+    action = $('create-share').hidden ? 'accept' : 'create';
+    label = action === 'create' ? 'Create new share link' : 'Accept files ↓';
+    disabled = action === 'accept' && $('accept-files').disabled;
+    summary = $('invite-summary').textContent;
+    hint = action === 'create' ? 'Start a handoff with your own files.' : 'Both tabs need to stay open.';
+  } else if (received.size) {
+    const saved = [...received.values()].every(file => file.saved);
+    action = 'save'; disabled = saving || saved;
+    label = saving ? 'Preparing ZIP…' : saved ? 'Files saved ✓' : received.size === 1 ? 'Save file ↓' : 'Save all files ↓';
+    summary = saving ? $('save-feedback').textContent : `${received.size} ${received.size === 1 ? 'file' : 'files'} verified`;
+    hint = saved ? 'Saved to your chosen folder.' : 'Save your files before closing this tab.';
+  } else if (!$('retry').hidden) {
+    action = 'retry'; label = 'Reconnect'; hint = 'Keep the sender’s tab open.';
+  } else { label = 'Waiting for files…'; disabled = true; }
+  button.dataset.action = action || ''; button.textContent = label; button.disabled = disabled;
+  $('mobile-summary').textContent = summary; $('mobile-amount').textContent = amount; $('mobile-hint').textContent = hint;
 }
 function abortIncoming(p) {
   if (p?.incoming) {
@@ -363,6 +401,7 @@ function renderFiles() {
       const preview = document.createElement('pre'); preview.className = 'note-preview'; preview.textContent = received.get(file.id).note; $('file-list').append(preview);
     }
   }
+  updateMobileAction();
 }
 function safeName(name) { return name.replace(/[\\/\x00-\x1f\x7f]/g, '_').replace(/^\.+/, '_') || 'file'; }
 async function connect() {
@@ -424,6 +463,15 @@ $('copy-link').onclick = async () => {
   }
 };
 $('copy-command').onclick = () => copy($('agent-command').textContent, $('copy-command'), 'Copy command');
+$('mobile-action').onclick = async () => {
+  const action = $('mobile-action').dataset.action;
+  if (action === 'share') {
+    try { await navigator.share({ title: 'Meatproxy handoff', url: $('share-link').value }); clearShareHighlight(); }
+    catch (error) { if (error.name !== 'AbortError') notice('Sharing was unavailable. Use Copy link in the share card.'); }
+  } else if (action === 'copy') {
+    if (await copy($('share-link').value, $('mobile-action'), 'Copy link ↗')) clearShareHighlight();
+  } else ({ accept: $('accept-files'), create: $('create-share'), save: $('download-all'), retry: $('retry') })[action]?.click();
+};
 const inputTabs = [$('files-tab'), $('note-tab')];
 function selectInputTab(tab) {
   for (const item of inputTabs) {
@@ -515,15 +563,16 @@ $('download-all').onclick = async () => {
   saving = true; $('download-all').disabled = true;
   $('save-feedback').hidden = false;
   $('save-feedback').textContent = single ? 'Starting download…' : 'Preparing ZIP…';
+  updateMobileAction();
   try {
     const url = single ? items[0].url : URL.createObjectURL(await archiveTasks.run('zip', {
       items: items.map(({ name, blob }) => ({ name, blob })),
-    }, { onProgress: done => { $('save-feedback').textContent = `Preparing ZIP · ${Math.round(done / total * 100)}%`; } }));
+    }, { onProgress: done => { $('save-feedback').textContent = `Preparing ZIP · ${Math.round(done / total * 100)}%`; updateMobileAction(); } }));
     const link = document.createElement('a'); link.href = url;
     link.download = single ? safeName(items[0].name) : 'meatproxy-handoff.zip';
     link.click();
     if (!single) setTimeout(() => URL.revokeObjectURL(url), 60_000);
     $('save-feedback').textContent = 'Download started. Check your browser’s downloads.';
   } catch (error) { $('save-feedback').textContent = `Could not prepare the download: ${error.message}`; }
-  finally { saving = false; $('download-all').disabled = received.size === 0; }
+  finally { saving = false; $('download-all').disabled = received.size === 0; updateMobileAction(); }
 };
