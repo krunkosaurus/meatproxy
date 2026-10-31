@@ -71,12 +71,18 @@ function progress(p, finished = false) {
   if (finished) p.progressActive = false;
   updateMobileAction();
 }
-// The sender streams a file without pausing longer than its 30 s acknowledgement deadline, so a
-// minute without any packet mid-file means it stopped. A failed sender cannot tell the receiver.
+// A failed or frozen sender cannot tell the receiver, so a minute without any packet while files
+// remain is reported. It is not fatal: a frozen tab or a slow file read can resume.
 const SENDER_SILENCE_MS = 60_000;
 setInterval(() => {
   if (!peer || peer.closed || peer.failed) return;
-  if (!isSender && peer.awaitingData && performance.now() - peer.heard > SENDER_SILENCE_MS) { fail(new Error('The sender stopped sending. Ask them to keep their tab open, then reconnect.')); return; }
+  const silent = !isSender && peer.awaitingData && performance.now() - peer.heard > SENDER_SILENCE_MS;
+  if (silent !== peer.stalled) {
+    peer.stalled = silent;
+    notice(silent ? 'The sender has not sent anything for a minute. Their tab may be closed, asleep or offline. Keep waiting, or save the files you have and reconnect to start over.' : '');
+    $('retry').hidden = !silent;
+    updateMobileAction();
+  }
   if (peer.progressActive) progress(peer);
 }, 500);
 function fail(error) {
@@ -92,7 +98,7 @@ function updateMobileAction() {
   bar.hidden = isSender && !files.length && !preparing;
   let action, label, hint = $('keep-open-text').textContent, disabled = false;
   let summary = $('status').textContent, amount = '';
-  const active = peer?.progressActive && !peer.closed && !peer.failed && peer.total > 0;
+  const active = peer?.progressActive && !peer.closed && !peer.failed && !peer.stalled && peer.total > 0;
   $('mobile-progress').hidden = !active;
   if (active) {
     $('mobile-progress').value = $('progress').value;
@@ -134,7 +140,7 @@ function abortIncoming(p) {
 function newPeer() {
   abortIncoming(peer);
   if (peer) { clearTimeout(peer.timer); peer.closed = true; peer.pc?.close(); peer.waiters.rejectAll(new Error('The recipient disconnected.')); }
-  peer = { session: '', pc: null, dc: null, transport: '', tx: Promise.resolve(), rx: Promise.resolve(), outSeq: 0, inSeq: 0, candidates: [], ready: false, sent: new Set(), announced: new Set(), waiters: createWaiters(), closed: false, failed: false, sending: false, total: 0, done: 0, heard: 0, awaitingData: false };
+  peer = { session: '', pc: null, dc: null, transport: '', tx: Promise.resolve(), rx: Promise.resolve(), outSeq: 0, inSeq: 0, candidates: [], ready: false, sent: new Set(), announced: new Set(), waiters: createWaiters(), closed: false, failed: false, sending: false, total: 0, done: 0, heard: 0, awaitingData: false, stalled: false };
   return peer;
 }
 async function signal(value, p = peer) {
@@ -251,7 +257,7 @@ function receivePacket(p, raw) {
       if (item.buffered >= RECEIVE_BLOCK_BYTES) await flushIncoming(item);
       if (item.offset % RECEIVE_BLOCK_BYTES === 0) await sendControl(p, { type: 'ack', id: item.meta.id, offset: item.offset });
     } else throw new Error('An unexpected transfer packet arrived.');
-  }).catch(error => { if (p === peer && !p.closed) fail(error); });
+  }).catch(error => { if (p === peer && !p.closed && !p.failed) fail(error); });
 }
 async function flushIncoming(item) {
   if (!item.parts.length) return;
@@ -284,7 +290,7 @@ async function onControl(p, message) {
   } else if (message.type === 'end' && !isSender) {
     const item = p.incoming;
     if (!item || item.meta.id !== message.id) throw new Error('Unexpected file completion.');
-    p.awaitingData = false; // Saving can take a while; the sender is waiting for us now.
+    p.awaitingData = false; // Saving can take a while, and the sender sends nothing until we confirm.
     await flushIncoming(item);
     const result = await fileTasks.run('finish', { token: item.token });
     if (p !== peer || p.closed || p.failed) return;
@@ -294,6 +300,8 @@ async function onControl(p, message) {
     item.meta.state = result.saved ? 'Saved to folder · verified' : 'Received · verified'; p.incoming = null; renderFiles();
     $('download-all').disabled = saving; $('copy-agent').disabled = ![...received.values()].some(file => /\.(md|txt)$/i.test(file.name) && file.size <= 1024 * 1024);
     await sendControl(p, { type: 'received', id: item.meta.id });
+    // Within a batch the sender starts the next file at once; it may have given up during a long save.
+    p.awaitingData = files.some(file => !received.has(file.id)); p.heard = performance.now();
   } else if (message.type === 'ack' && isSender) p.waiters.resolve(`ack:${message.id}:${message.offset}`);
   else if (message.type === 'received' && isSender) p.waiters.resolve(`done:${message.id}`);
   else if (message.type === 'complete' && !isSender) {

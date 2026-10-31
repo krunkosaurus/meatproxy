@@ -7,7 +7,7 @@ import { parseHTML } from 'linkedom';
 
 const { document, HTMLElement, HTMLAnchorElement } = parseHTML(await readFile(new URL('../public/index.html', import.meta.url), 'utf8'));
 const location = new URL(workerData.url), downloads = [];
-let clipboard = '', finishing = false;
+let clipboard = '', finishing = false, resume;
 // Tests move this page's clock forward to reach long timeouts without waiting for them.
 const clock = performance.now.bind(performance); let skew = 0;
 Object.defineProperty(performance, 'now', { configurable: true, value: () => clock() + skew });
@@ -58,7 +58,11 @@ parentPort.on('message', async ({ id, command, ...args }) => {
       note: $('note').value, editing: !$('cancel-note').hidden, clipboard, finishing,
     };
     else if (command === 'advance') skew += args.ms;
-    else if (command === 'stall') WebSocket.prototype.send = () => {}; // The sender's tab stops sending without closing.
+    else if (command === 'stall') { // The tab freezes without closing; its messages leave when it resumes.
+      const send = WebSocket.prototype.send, queued = [];
+      WebSocket.prototype.send = function (data) { queued.push([this, data]); };
+      resume = () => { WebSocket.prototype.send = send; for (const [socket, data] of queued) send.call(socket, data); };
+    } else if (command === 'resume') resume();
     else if (command === 'add') {
       const files = args.files.map(({ name, size, byte = 71 }) => new File([new Uint8Array(size).fill(byte)], name));
       $('file-input').onchange({ target: { files, value: '' } });
