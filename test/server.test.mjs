@@ -43,12 +43,15 @@ const pageReferences = html => [...html.matchAll(/(?:href|src|content)="(?:https
 const version = bytes => fingerprint(new Map([['/bytes.bin', bytes]])).get('/bytes.bin').version;
 
 test('every asset the page references is versioned by content; only that exact version is cacheable', async t => {
-  const { app } = await setup(t);
+  const { app, connect } = await setup(t);
   const base = `http://127.0.0.1:${app.server.address().port}`;
   const page = await fetch(base + '/');
   assert.equal(page.headers.get('cache-control'), 'no-store');
   const html = Buffer.from(await page.arrayBuffer());
-  assert.equal((await fetch(`${base}/?v=${version(html)}`)).headers.get('cache-control'), 'no-store', 'Pages are never cacheable, even at their own version');
+  const { room } = await create(connect);
+  for (const path of [`/?v=${version(html)}`, `/s/${room}?v=${version(html)}`, `/s/${room}/status`, `/s/${room}/status?v=${version(html)}`]) {
+    assert.equal((await fetch(base + path)).headers.get('cache-control'), 'no-store', `${path} is never cacheable`);
+  }
   const references = new Set(pageReferences(html.toString()));
   for (const path of ['/app.js', '/protocol.js', '/transfer.js', '/file-tasks.js', '/handoff.js', '/style.css', '/logo.svg', '/favicon.png', '/favicon.svg', '/og.png', '/receive.mjs']) {
     assert.ok([...references].some(reference => reference.startsWith(`${path}?v=`)), `The page references a versioned ${path}`);
@@ -70,7 +73,14 @@ test('every asset the page references is versioned by content; only that exact v
 test('modules import each other, and start the worker, at the exact URLs the page preloads', async t => {
   const { app } = await setup(t);
   const base = `http://127.0.0.1:${app.server.address().port}`;
-  const urls = Object.fromEntries(pageReferences(await fetch(base + '/').then(response => response.text())).map(reference => [reference.split('?')[0], reference]));
+  const html = await fetch(base + '/').then(response => response.text());
+  const urls = Object.fromEntries(pageReferences(html).map(reference => [reference.split('?')[0], reference]));
+  // A reference the fingerprinting misses would load a second copy of a module with separate state.
+  const unversioned = /[`'"](?:\.{1,2}\/)*\/?(?:app|protocol|transfer|file-tasks|handoff|file-worker)\.js(?!\?v=[0-9a-f]{12})/;
+  const workerURL = (await fetch(base + urls['/file-tasks.js']).then(response => response.text())).match(/'(\/file-worker\.js\?v=[0-9a-f]{12})'/)[1];
+  for (const url of ['/', urls['/app.js'], urls['/protocol.js'], urls['/transfer.js'], urls['/file-tasks.js'], urls['/handoff.js'], workerURL]) {
+    assert.doesNotMatch(await fetch(base + url).then(response => response.text()), unversioned, `${url} refers to every module by its version`);
+  }
   for (const [module, dependencies] of [['/app.js', ['/file-tasks.js', '/handoff.js', '/protocol.js', '/transfer.js']], ['/transfer.js', ['/protocol.js']], ['/handoff.js', ['/protocol.js']], ['/file-tasks.js', ['/file-worker.js']]]) {
     const source = await fetch(base + urls[module]).then(response => response.text());
     const found = [...source.matchAll(/'\.?(\/[\w.-]+\.js)(\?v=[0-9a-f]{12})?'/g)];
@@ -86,8 +96,8 @@ test('modules import each other, and start the worker, at the exact URLs the pag
 
 test('changing a file gives it, and everything that references it, a new URL; nothing else changes', () => {
   const sources = new Map([
-    ['/index.html', Buffer.from('<link rel="modulepreload" href="/protocol.js"><script type="module" src="/app.js"></script><link rel="stylesheet" href="/style.css"><meta property="og:image" content="https://meatproxy.to/og.png"><a href="/">Home</a>')],
-    ['/app.js', Buffer.from("import { a } from './protocol.js';\nnew Worker('/worker.js', { type: 'module' });\nfetch('/s/room/status');")],
+    ['/index.html', Buffer.from('<link rel="modulepreload" href="/protocol.js"><script type="module" src="/app.js"></script><link rel="stylesheet" href="/style.css"><meta property="og:image" content="https://meatproxy.to/og.png"><a href="/">Home</a><a href="/missing.css">Missing</a>')],
+    ['/app.js', Buffer.from("import { a } from './protocol.js';\nnew Worker('/worker.js', { type: 'module' });\nfetch('/missing.js');")],
     ['/protocol.js', Buffer.from('export const a = 1;')],
     ['/worker.js', Buffer.from('self.onmessage = () => {};')],
     ['/style.css', Buffer.from('body { margin: 0; }')],
@@ -99,9 +109,9 @@ test('changing a file gives it, and everything that references it, a new URL; no
   const app = after.get('/app.js').body.toString(), page = after.get('/index.html').body.toString();
   assert.ok(app.includes(`from './protocol.js?v=${after.get('/protocol.js').version}'`));
   assert.ok(app.includes(`new Worker('/worker.js?v=${after.get('/worker.js').version}'`));
-  assert.ok(app.includes("fetch('/s/room/status')"), 'Strings that are not assets stay unchanged');
+  assert.ok(app.includes("fetch('/missing.js')"), 'Script paths that are not assets stay unchanged');
   assert.ok(page.includes(`content="https://meatproxy.to/og.png?v=${version(sources.get('/og.png'))}"`));
-  assert.ok(page.includes('<a href="/">Home</a>'));
+  assert.ok(page.includes('<a href="/">Home</a><a href="/missing.css">Missing</a>'), 'Page paths that are not assets stay unchanged');
   assert.equal(after.get('/og.png').body, sources.get('/og.png'), 'Binary assets are served as they are');
   // Caches keep headers with the bytes, so changing response headers must change every version.
   const headersChanged = fingerprint(sources, 'other response headers');
