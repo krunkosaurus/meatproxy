@@ -72,16 +72,17 @@ const relayLimits = {
   signals: 32 * 1024, // Per receiver connection and direction: setup takes about 5-15 KB.
   // Sent per day. Separate from the relay allowances, so a spent relay allowance never blocks direct
   // setup. These bound what rejoining from rotating addresses can carry, and a network's allowance is
-  // 64 customers' worth, so one neighbour cannot spend it.
-  customerSignals: 16 * 1024 * 1024,
+  // 64 addresses' worth, so one neighbour cannot spend it.
+  addressSignals: 16 * 1024 * 1024,
   networkSignals: 1024 ** 3,
   room: 4 * 1024 ** 3, // Per link, over its 12-hour life.
   addressDaily: 4 * 1024 ** 3,
   networkDaily: 16 * 1024 ** 3,
   daily: 50 * 1024 ** 3,
 };
-// Low enough that filling the 200-socket cap takes seven networks.
-const connectionLimits = { address: 16, network: 32 };
+// A network may hold four addresses' worth, so one neighbour cannot fill it, and filling the
+// 200-socket cap takes seven networks.
+const connectionLimits = { address: 8, network: 32 };
 // Pages word these close codes for their reader; the reasons are for the command-line receiver.
 const refusals = {
   handoff: [4001, 'Relay limit reached for this handoff'],
@@ -92,21 +93,16 @@ const refusals = {
   connections: [4005, 'Too many connections from this network; close other Meatproxy tabs and try again'],
   setup: [4006, "This network has used today's connection setup allowance; try again after 00:00 UTC"],
 };
-// One user typically controls an IPv4 address or an IPv6 /64, and one provider network an IPv4 /24
-// or an IPv6 /48, so limits count those as one address and one network. ISPs commonly delegate a
-// /56 (256 /64s) to one customer, so the signal allowance, which a neighbour could otherwise spend
-// for its whole network, counts an IPv6 /56 as one customer.
+// One customer typically holds an IPv4 address or an IPv6 /56 (ISPs commonly delegate 256 /64s to a
+// household), and one provider network an IPv4 /24 or an IPv6 /48, so limits count those as one
+// address and one network.
 function addressKeys(address) {
   const v4 = address.match(/^(?:::ffff:)?(\d+)\.(\d+)\.(\d+)\.(\d+)$/i);
-  if (v4) return { address: v4.slice(1).join('.'), customer: v4.slice(1).join('.'), network: `${v4.slice(1, 4).join('.')}.0/24` };
+  if (v4) return { address: v4.slice(1).join('.'), network: `${v4.slice(1, 4).join('.')}.0/24` };
   const [head, tail = ''] = address.split('::');
   const left = head ? head.split(':') : [], right = tail ? tail.split(':') : [];
   const groups = [...left, ...Array(Math.max(0, 8 - left.length - right.length)).fill('0'), ...right].map(group => parseInt(group, 16).toString(16));
-  return {
-    address: `${groups.slice(0, 4).join(':')}::/64`,
-    customer: `${groups.slice(0, 3).join(':')}:${(parseInt(groups[3], 16) & 0xff00).toString(16)}::/56`,
-    network: `${groups.slice(0, 3).join(':')}::/48`,
-  };
+  return { address: `${groups.slice(0, 3).join(':')}:${(parseInt(groups[3], 16) & 0xff00).toString(16)}::/56`, network: `${groups.slice(0, 3).join(':')}::/48` };
 }
 const escapeHTML = value => value.replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
 
@@ -191,8 +187,8 @@ export function createApp({ origin = process.env.PUBLIC_ORIGIN, maxClients = 200
     today();
     if (!keys) return;
     const used = key => usage.signals.get(key) || 0;
-    if (used(keys.customer) + bytes > limit.customerSignals || used(keys.network) + bytes > limit.networkSignals) return refusals.setup;
-    for (const key of [keys.customer, keys.network]) count(usage.signals, key, bytes);
+    if (used(keys.address) + bytes > limit.addressSignals || used(keys.network) + bytes > limit.networkSignals) return refusals.setup;
+    for (const key of keysOf(keys)) count(usage.signals, key, bytes);
   };
   // The other peer learns why from sender-left or peer-left.
   const closeWith = (ws, [code, reason]) => { ws.closeCode = code; ws.closeReason = reason; ws.close(code, reason); };

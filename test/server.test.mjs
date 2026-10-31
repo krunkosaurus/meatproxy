@@ -491,8 +491,8 @@ test('signals count their bytes on the wire, per receiver connection', { timeout
   assert.equal(await closed, '4001 Connection setup limit reached');
 });
 
-test('reconnecting cannot turn signals into a pipe: they have a daily allowance per customer and per network', { timeout: 10000 }, async t => {
-  const { connect } = await setup(t, { limits: { signals: 10_000, customerSignals: 20_000, networkSignals: 40_000 } });
+test('reconnecting cannot turn signals into a pipe: they have a daily allowance per address and per network', { timeout: 10000 }, async t => {
+  const { connect } = await setup(t, { limits: { signals: 10_000, addressSignals: 20_000, networkSignals: 40_000 } });
   const signal = JSON.stringify({ type: 'signal', payload: 'x'.repeat(5_970) }); // About 6 KB per receiver connection.
   const accepted = async address => {
     const { owner, receiver } = await limitedPair(connect, address);
@@ -510,7 +510,7 @@ test('reconnecting cannot turn signals into a pipe: they have a daily allowance 
   for (let session = 0; session < 3; session++) await accepted('203.0.113.6');
   await refused('203.0.113.7'); // but rotating addresses stops at the network's.
   await accepted('198.51.100.1');
-  // An IPv6 customer's /56 holds 256 /64s; together they get one customer's allowance.
+  // An IPv6 customer's /56 holds 256 /64s; together they get one address's allowance.
   for (const address of ['2001:db8:d0:100::1', '2001:db8:d0:100::2', '2001:db8:d0:1ff::1']) await accepted(address);
   await refused('2001:db8:d0:1aa::1');
   await accepted('2001:db8:d0:200::1'); // Another customer in the same /48.
@@ -647,13 +647,13 @@ test("sockets opened only to be refused take none of the service's slots, and th
 test('behind a proxy, extra connections from one address or network are closed with a reason, then refused', { timeout: 10000 }, async t => {
   const { app, connect } = await setup(t, { maxConnections: { address: 2, network: 3 } });
   const upgrade = address => rawUpgrade(t, app, address);
-  await connect('2001:db8:1:2::1'); await connect('2001:db8:1:2:abcd::5'); // One /64.
-  const told = await connect('2001:db8:1:2:ffff::1');
+  await connect('2001:db8:1:2::1'); await connect('2001:db8:1:5:abcd::5'); // One /56, a customer's.
+  const told = await connect('2001:db8:1:ff::1');
   assert.equal(await closeOf(told), '4005 Too many connections from this network; close other Meatproxy tabs and try again');
   assert.equal(await upgrade('2001:db8:1:2::77'), 101); // Accepted only to be closed...
   assert.equal(await upgrade('2001:db8:1:2::78'), 101);
   assert.equal(await upgrade('2001:db8:1:2::79'), 429); // ...and beyond twice the limit, refused outright.
-  assert.equal(await closeOf(await connect('2001:db8:1:3::1')), '4005 Too many connections from this network; close other Meatproxy tabs and try again', 'The /48 is full too');
+  assert.equal(await closeOf(await connect('2001:db8:1:300::1')), '4005 Too many connections from this network; close other Meatproxy tabs and try again', 'The /48 is full too');
   await connect('198.51.100.7'); await connect('::ffff:198.51.100.7');
   assert.match(await closeOf(await connect('198.51.100.7')), /^4005 /);
   for (let i = 0; i < 5; i++) await connect(); // Without X-Real-IP (no proxy), there are no per-address limits.
