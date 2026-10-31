@@ -90,7 +90,7 @@ const refusals = {
   link: [4002, 'This link has used its relay allowance; ask the sender for a fresh link'],
   network: [4003, 'This network has used its relay allowance for now; try again later'],
   relay: [4004, "The relay has reached today's limit; try again after 00:00 UTC"],
-  connections: [4005, 'Too many connections from this network; close other Meatproxy tabs and try again'],
+  connections: [4005, 'Too many connections from this network; close Meatproxy tabs you no longer need, or try again later'],
   setup: [4006, "This network has used today's connection setup allowance; try again after 00:00 UTC"],
 };
 // One customer typically holds an IPv4 address or an IPv6 /56 (ISPs commonly delegate 256 /64s to a

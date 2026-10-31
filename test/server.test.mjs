@@ -649,7 +649,7 @@ test('behind a proxy, extra connections from one address or network are closed w
   const upgrade = address => rawUpgrade(t, app, address);
   await connect('2001:db8:1:2::1'); await connect('2001:db8:1:5:abcd::5'); // One /56, a customer's.
   const told = await connect('2001:db8:1:ff::1');
-  assert.equal(await closeOf(told), '4005 Too many connections from this network; close other Meatproxy tabs and try again');
+  assert.equal(await closeOf(told), '4005 Too many connections from this network; close Meatproxy tabs you no longer need, or try again later');
   assert.equal(await upgrade('2001:db8:1:2::77'), 101); // Accepted only to be closed...
   assert.equal(await upgrade('2001:db8:1:2::78'), 101);
   assert.equal(await upgrade('2001:db8:1:2::79'), 429); // ...and beyond twice the limit, refused outright.
@@ -658,7 +658,7 @@ test('behind a proxy, extra connections from one address or network are closed w
     return Promise.race([message(ws).then(msg => msg.type), closeOf(ws)]);
   };
   assert.equal(await kept('2001:db8:1:300::1'), 'created', 'Refused sockets count only toward their own address, so the rest of the /48 can still connect');
-  assert.equal(await kept('2001:db8:1:400::1'), '4005 Too many connections from this network; close other Meatproxy tabs and try again', 'The /48 is full');
+  assert.equal(await kept('2001:db8:1:400::1'), '4005 Too many connections from this network; close Meatproxy tabs you no longer need, or try again later', 'The /48 is full');
   await connect('198.51.100.7'); await connect('::ffff:198.51.100.7');
   assert.match(await closeOf(await connect('198.51.100.7')), /^4005 /);
   for (let i = 0; i < 5; i++) await connect(); // Without X-Real-IP (no proxy), there are no per-address limits.

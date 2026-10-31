@@ -27,7 +27,7 @@ function relayLimit(code, own) {
     4002: `This link has used its relay allowance. ${isSender ? 'Start a new handoff to make a fresh link.' : 'Ask the sender for a fresh link.'}`,
     4003: own ? 'Your network has used its relay allowance for now. Try again later.' : `${other}'s network has used its relay allowance for now.`,
     4004: isSender && !own ? "The relay has reached today's limit, so this recipient could not connect. Recipients who can connect directly are not affected." : "The relay has reached today's limit. Try again after 00:00 UTC.",
-    4005: 'Too many Meatproxy connections from your network right now. Close other Meatproxy tabs or try again later.',
+    4005: 'Too many Meatproxy connections from your network right now. Close Meatproxy tabs you no longer need, or try again later.',
     4006: own ? "Your network has used today's connection setup allowance. Try again after 00:00 UTC." : `${other}'s network has used today's connection setup allowance.`,
   }[code];
 }
