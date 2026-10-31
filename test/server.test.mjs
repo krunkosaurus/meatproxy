@@ -64,11 +64,11 @@ test('every asset the page references is versioned by content; only that exact v
   const { app, connect } = await setup(t);
   const base = `http://127.0.0.1:${app.server.address().port}`;
   const page = await fetch(base + '/');
-  assert.equal(page.headers.get('cache-control'), 'no-store');
+  assert.equal(page.headers.get('cache-control'), 'no-store, no-transform');
   const html = Buffer.from(await page.arrayBuffer());
   const { room } = await create(connect);
   for (const path of [`/?v=${version(html)}`, `/s/${room}?v=${version(html)}`, `/s/${room}/status`, `/s/${room}/status?v=${version(html)}`]) {
-    assert.equal((await fetch(base + path)).headers.get('cache-control'), 'no-store', `${path} is never cacheable`);
+    assert.equal((await fetch(base + path)).headers.get('cache-control'), 'no-store, no-transform', `${path} is never cacheable`);
   }
   const references = new Set(pageReferences(html.toString()));
   for (const path of ['/app.js', '/protocol.js', '/transfer.js', '/file-tasks.js', '/handoff.js', '/style.css', '/logo.svg', '/favicon.png', '/favicon.svg', '/og.png', '/receive.mjs']) {
@@ -83,8 +83,8 @@ test('every asset the page references is versioned by content; only that exact v
     assert.equal(version(Buffer.from(await response.arrayBuffer())), searchParams.get('v'), `${reference} names its exact bytes`);
     const head = await fetch(base + reference, { method: 'HEAD' });
     assert.equal(head.headers.get('cache-control'), 'public, max-age=31536000, immutable', `HEAD ${reference}`);
-    assert.equal((await fetch(base + pathname)).headers.get('cache-control'), 'no-store', `${pathname} without a version`);
-    assert.equal((await fetch(`${base}${pathname}?v=000000000000`)).headers.get('cache-control'), 'no-store', `${pathname} with a stale version`);
+    assert.equal((await fetch(base + pathname)).headers.get('cache-control'), 'no-store, no-transform', `${pathname} without a version`);
+    assert.equal((await fetch(`${base}${pathname}?v=000000000000`)).headers.get('cache-control'), 'no-store, no-transform', `${pathname} with a stale version`);
   }
 });
 
@@ -178,7 +178,7 @@ test('social crawlers get a valid public preview without exposing or joining a h
   assert.equal(response.status, 200);
   assert.equal(response.headers.get('x-robots-tag'), 'noindex, nofollow');
   const html = await response.text();
-  assert.equal(response.headers.get('cache-control'), 'no-store');
+  assert.equal(response.headers.get('cache-control'), 'no-store, no-transform');
   assert.match(html, /Someone wants to send you files/);
   assert.match(html, /Sender online when previewed/);
   assert.match(html, /Open to accept a peer-to-peer transfer/);
