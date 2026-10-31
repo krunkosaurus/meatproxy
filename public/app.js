@@ -32,6 +32,9 @@ async function checkInvite() {
     if (accepted) return;
     state = preview.state;
     $('accept-files').disabled = state !== 'online';
+    $('accept-files').hidden = state === 'offline';
+    $('create-share').hidden = state !== 'offline';
+    $('invite-help').textContent = state === 'offline' ? 'Start a new handoff with your own files.' : 'Receive from the sender’s browser. Both of you need to stay online.';
     $('invite-summary').textContent = state === 'offline' ? 'This link has expired.' : preview.count ? `${preview.count} ${preview.count === 1 ? 'file' : 'files'} · ${size(preview.totalBytes)}` : 'The sender is choosing files.';
     $('invite-names').textContent = preview.names.join(' · ') + (preview.names.length && preview.count > preview.names.length ? ` · + ${preview.count - preview.names.length} more` : '');
     $('invite-names').hidden = preview.names.length === 0;
