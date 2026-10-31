@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { connect as connectTCP } from 'node:net';
 import WebSocket from 'ws';
-import { createApp, fingerprint } from '../server.mjs';
+import { createApp, fingerprint, securityHeaders } from '../server.mjs';
 import { makeSecret, importSecret, encrypt, decrypt, validateManifest } from '../public/protocol.js';
 
 async function setup(t) {
@@ -70,27 +70,41 @@ test('every asset the page references is versioned by content; only that exact v
   }
 });
 
-test('modules import each other, and start the worker, at the exact URLs the page preloads', async t => {
+test('the page and every module it loads refer to each script only at its current version', async t => {
   const { app } = await setup(t);
   const base = `http://127.0.0.1:${app.server.address().port}`;
+  // A missed or outdated reference would load a second copy of a module with separate state.
+  const unversioned = /[`'"](?:\.{1,2}\/)*\/?[\w.-]+\.js(?!\?v=[0-9a-f]{12}[`'"])/;
+  const versioned = /[`'"]\.{0,2}(\/[\w.-]+\.(?:js|css|png|svg|mjs)\?v=[0-9a-f]{12})[`'"]/g;
   const html = await fetch(base + '/').then(response => response.text());
-  const urls = Object.fromEntries(pageReferences(html).map(reference => [reference.split('?')[0], reference]));
-  // A reference the fingerprinting misses would load a second copy of a module with separate state.
-  const unversioned = /[`'"](?:\.{1,2}\/)*\/?(?:app|protocol|transfer|file-tasks|handoff|file-worker)\.js(?!\?v=[0-9a-f]{12})/;
-  const workerURL = (await fetch(base + urls['/file-tasks.js']).then(response => response.text())).match(/'(\/file-worker\.js\?v=[0-9a-f]{12})'/)[1];
-  for (const url of ['/', urls['/app.js'], urls['/protocol.js'], urls['/transfer.js'], urls['/file-tasks.js'], urls['/handoff.js'], workerURL]) {
-    assert.doesNotMatch(await fetch(base + url).then(response => response.text()), unversioned, `${url} refers to every module by its version`);
-  }
-  for (const [module, dependencies] of [['/app.js', ['/file-tasks.js', '/handoff.js', '/protocol.js', '/transfer.js']], ['/transfer.js', ['/protocol.js']], ['/handoff.js', ['/protocol.js']], ['/file-tasks.js', ['/file-worker.js']]]) {
-    const source = await fetch(base + urls[module]).then(response => response.text());
-    const found = [...source.matchAll(/'\.?(\/[\w.-]+\.js)(\?v=[0-9a-f]{12})?'/g)];
-    assert.deepEqual(found.map(match => match[1]).sort(), dependencies, `${module} references`);
-    for (const [, path, query] of found) {
-      assert.ok(query, `${module} references a versioned ${path}`);
-      // One URL per module keeps a single shared instance of each module.
-      if (urls[path]) assert.equal(path + query, urls[path], `${module} imports the preloaded ${path}`);
-      else assert.equal(version(Buffer.from(await fetch(base + path + query).then(response => response.arrayBuffer()))), query.slice(3), `${path} names its exact bytes`);
+  assert.doesNotMatch(html, /\b(?:src|href)=[^"]/, 'Every page reference is quoted, so it is versioned');
+  const queue = ['/'], seen = new Set(queue);
+  while (queue.length) {
+    const url = queue.shift(), body = await fetch(base + url).then(response => response.text());
+    assert.doesNotMatch(body, unversioned, `${url} refers to every script by its version`);
+    for (const [, reference] of body.matchAll(versioned)) {
+      if (seen.has(reference)) continue;
+      seen.add(reference);
+      assert.equal((await fetch(base + reference)).headers.get('cache-control'), 'public, max-age=31536000, immutable', `${url} refers to the current ${reference}`);
+      if (reference.includes('.js?')) queue.push(reference);
     }
+  }
+  for (const path of ['/app.js', '/protocol.js', '/transfer.js', '/file-tasks.js', '/handoff.js', '/file-worker.js']) {
+    assert.ok([...seen].some(reference => reference.startsWith(`${path}?v=`)), `The page loads ${path}`);
+  }
+});
+
+test('a cacheable response carries exactly the headers its version covers', async t => {
+  const { app } = await setup(t);
+  const base = `http://127.0.0.1:${app.server.address().port}`;
+  const references = pageReferences(await fetch(base + '/').then(response => response.text()));
+  const worker = (await fetch(base + references.find(reference => reference.startsWith('/file-tasks.js?'))).then(response => response.text())).match(/'(\/file-worker\.js\?v=\w+)'/)[1];
+  // The worker's own response sets the policy it runs under, so it must not drift from its version.
+  for (const reference of [worker, references.find(reference => reference.startsWith('/style.css?'))]) {
+    const response = await fetch(base + reference);
+    assert.equal(response.headers.get('cache-control'), 'public, max-age=31536000, immutable');
+    const sent = Object.fromEntries([...response.headers].filter(([name]) => !['date', 'connection', 'keep-alive', 'content-length', 'transfer-encoding', 'cache-control', 'content-type'].includes(name)));
+    assert.deepEqual(sent, Object.fromEntries(Object.entries(securityHeaders).map(([name, value]) => [name.toLowerCase(), value])), reference);
   }
 });
 
@@ -127,8 +141,12 @@ test('a malformed request target gets 400 and the service keeps running', async 
   assert.equal((await fetch(`http://127.0.0.1:${app.server.address().port}/healthz`)).status, 200);
 });
 
-test('a public origin that is not a URL stops the service at startup, not on the first recipient link', () => {
-  assert.throws(() => createApp({ origin: 'meatproxy.to' }), /Invalid URL/);
+test('a public origin that is not exactly an http(s) origin stops the service at startup', () => {
+  // A trailing slash would refuse every browser socket; other schemes would fail on the first recipient link.
+  for (const origin of ['meatproxy.to', 'https://meatproxy.to/', 'javascript:alert(1)', 'https://meatproxy.to/path']) {
+    assert.throws(() => createApp({ origin }), origin);
+  }
+  for (const origin of ['https://meatproxy.to', 'http://localhost:3477']) createApp({ origin }).server.close();
 });
 
 test('social crawlers get a valid public preview without exposing or joining a handoff', async t => {

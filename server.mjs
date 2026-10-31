@@ -24,7 +24,7 @@ const assets = new Map([
   ...['online', 'busy', 'offline'].map(state => [`/og-${state}.png`, [`og-${state}.png`, 'image/png']]),
   ['/receive.mjs', ['receive.mjs', 'text/javascript; charset=utf-8']],
 ]);
-const securityHeaders = {
+export const securityHeaders = {
   'X-Content-Type-Options': 'nosniff',
   'Referrer-Policy': 'no-referrer',
   'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'",
@@ -88,7 +88,9 @@ function renderPreview(html, preview, url) {
 
 export function createApp({ origin = process.env.PUBLIC_ORIGIN, maxClients = 200 } = {}) {
   const rooms = new Map();
+  // Socket origins are compared to this exact string, so accept only a bare http(s) origin.
   const publicOrigin = new URL(origin || 'https://meatproxy.to');
+  if (!/^https?:$/.test(publicOrigin.protocol) || (origin && publicOrigin.origin !== origin)) throw new Error(`PUBLIC_ORIGIN must be an origin such as https://meatproxy.to, not ${origin}`);
   const server = http.createServer((req, res) => {
     for (const header of Object.entries(securityHeaders)) res.setHeader(...header);
     res.setHeader('Cache-Control', 'no-store');
