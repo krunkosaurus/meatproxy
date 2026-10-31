@@ -6,8 +6,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import WebSocket from 'ws';
-import { createApp } from '../server.mjs';
+import { createApp, fingerprint } from '../server.mjs';
 import { makeSecret, importSecret, encrypt, decrypt, validateManifest } from '../public/protocol.js';
 
 async function setup(t) {
@@ -37,6 +38,72 @@ test('browser worker and imported handoff modules are served as JavaScript', asy
   assert.match(await fetch(base + '/hashes-LICENSE.txt').then(response => response.text()), /MIT License/);
 });
 
+const pageReferences = html => [...html.matchAll(/(?:href|src|content)="(?:https:\/\/meatproxy\.to)?(\/[\w.-]+(?:\?[^"]*)?)"/g)].map(match => match[1]);
+const version = bytes => createHash('sha256').update(bytes).digest('hex').slice(0, 12);
+
+test('every asset the page references is versioned by content; only that exact version is cacheable', async t => {
+  const { app } = await setup(t);
+  const base = `http://127.0.0.1:${app.server.address().port}`;
+  const page = await fetch(base + '/');
+  assert.equal(page.headers.get('cache-control'), 'no-store');
+  const html = Buffer.from(await page.arrayBuffer());
+  assert.equal((await fetch(`${base}/?v=${version(html)}`)).headers.get('cache-control'), 'no-store', 'Pages are never cacheable, even at their own version');
+  const references = new Set(pageReferences(html.toString()));
+  for (const path of ['/app.js', '/protocol.js', '/transfer.js', '/file-tasks.js', '/handoff.js', '/style.css', '/logo.svg', '/favicon.png', '/favicon.svg', '/og.png', '/receive.mjs']) {
+    assert.ok([...references].some(reference => reference.startsWith(`${path}?v=`)), `The page references a versioned ${path}`);
+  }
+  for (const reference of references) {
+    const { pathname, searchParams } = new URL(reference, base);
+    assert.match(searchParams.get('v') ?? '', /^[0-9a-f]{12}$/, `${reference} carries a content version`);
+    const response = await fetch(base + reference);
+    assert.equal(response.status, 200, reference);
+    assert.equal(response.headers.get('cache-control'), 'public, max-age=31536000, immutable', reference);
+    assert.equal(version(Buffer.from(await response.arrayBuffer())), searchParams.get('v'), `${reference} names its exact bytes`);
+    const head = await fetch(base + reference, { method: 'HEAD' });
+    assert.equal(head.headers.get('cache-control'), 'public, max-age=31536000, immutable', `HEAD ${reference}`);
+    assert.equal((await fetch(base + pathname)).headers.get('cache-control'), 'no-store', `${pathname} without a version`);
+    assert.equal((await fetch(`${base}${pathname}?v=000000000000`)).headers.get('cache-control'), 'no-store', `${pathname} with a stale version`);
+  }
+});
+
+test('modules import each other, and start the worker, at the exact URLs the page preloads', async t => {
+  const { app } = await setup(t);
+  const base = `http://127.0.0.1:${app.server.address().port}`;
+  const urls = Object.fromEntries(pageReferences(await fetch(base + '/').then(response => response.text())).map(reference => [reference.split('?')[0], reference]));
+  for (const [module, dependencies] of [['/app.js', ['/file-tasks.js', '/handoff.js', '/protocol.js', '/transfer.js']], ['/transfer.js', ['/protocol.js']], ['/handoff.js', ['/protocol.js']], ['/file-tasks.js', ['/file-worker.js']]]) {
+    const source = await fetch(base + urls[module]).then(response => response.text());
+    const found = [...source.matchAll(/'\.?(\/[\w.-]+\.js)(\?v=[0-9a-f]{12})?'/g)];
+    assert.deepEqual(found.map(match => match[1]).sort(), dependencies, `${module} references`);
+    for (const [, path, query] of found) {
+      assert.ok(query, `${module} references a versioned ${path}`);
+      // One URL per module keeps a single shared instance of each module.
+      if (urls[path]) assert.equal(path + query, urls[path], `${module} imports the preloaded ${path}`);
+      else assert.equal(version(Buffer.from(await fetch(base + path + query).then(response => response.arrayBuffer()))), query.slice(3), `${path} names its exact bytes`);
+    }
+  }
+});
+
+test('changing a file gives it, and everything that references it, a new URL; nothing else changes', () => {
+  const sources = new Map([
+    ['/index.html', Buffer.from('<link rel="modulepreload" href="/protocol.js"><script type="module" src="/app.js"></script><link rel="stylesheet" href="/style.css"><meta property="og:image" content="https://meatproxy.to/og.png"><a href="/">Home</a>')],
+    ['/app.js', Buffer.from("import { a } from './protocol.js';\nnew Worker('/worker.js', { type: 'module' });\nfetch('/s/room/status');")],
+    ['/protocol.js', Buffer.from('export const a = 1;')],
+    ['/worker.js', Buffer.from('self.onmessage = () => {};')],
+    ['/style.css', Buffer.from('body { margin: 0; }')],
+    ['/og.png', Buffer.from([0x89, 0x50, 0x4e, 0x47])],
+  ]);
+  const before = fingerprint(sources);
+  const after = fingerprint(new Map(sources).set('/protocol.js', Buffer.from('export const a = 2;')));
+  assert.deepEqual([...before.keys()].filter(path => before.get(path).version !== after.get(path).version).sort(), ['/app.js', '/index.html', '/protocol.js']);
+  const app = after.get('/app.js').body.toString(), page = after.get('/index.html').body.toString();
+  assert.ok(app.includes(`from './protocol.js?v=${after.get('/protocol.js').version}'`));
+  assert.ok(app.includes(`new Worker('/worker.js?v=${after.get('/worker.js').version}'`));
+  assert.ok(app.includes("fetch('/s/room/status')"), 'Strings that are not assets stay unchanged');
+  assert.ok(page.includes(`content="https://meatproxy.to/og.png?v=${version(sources.get('/og.png'))}"`));
+  assert.ok(page.includes('<a href="/">Home</a>'));
+  assert.equal(after.get('/og.png').body, sources.get('/og.png'), 'Binary assets are served as they are');
+});
+
 test('social crawlers get a valid public preview without exposing or joining a handoff', async t => {
   const { app, connect } = await setup(t);
   const { room } = await create(connect);
@@ -57,9 +124,11 @@ test('social crawlers get a valid public preview without exposing or joining a h
   const image = html.match(/property="og:image" content="([^"]+)"/)[1];
   assert.equal(new URL(image).origin, 'https://meatproxy.to');
   assert.equal(new URL(image).pathname, '/og-online.png');
-  const card = await fetch(base + new URL(image).pathname);
+  assert.match(new URL(image).search, /^\?v=[0-9a-f]{12}$/);
+  const card = await fetch(base + new URL(image).pathname + new URL(image).search);
   assert.equal(card.status, 200);
   assert.equal(card.headers.get('content-type'), 'image/png');
+  assert.equal(card.headers.get('cache-control'), 'public, max-age=31536000, immutable');
   const png = Buffer.from(await card.arrayBuffer());
   assert.equal(png.subarray(0, 8).toString('hex'), '89504e470d0a1a0a');
   assert.equal(png.readUInt32BE(16), 1200);

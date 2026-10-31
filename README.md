@@ -43,7 +43,7 @@ npm run build
 npm start
 ```
 
-Open http://localhost:3477. The first page creates a room; its address becomes the recipient URL. `npm run build` bundles the shared crypto protocol and the Node receiver source into `public/receive.mjs`, builds the browser file worker, and regenerates the brand images. Regenerate it after changes to these sources. The file worker uses the pinned `@noble/hashes` SHA-256 implementation; its MIT license is shipped as `public/hashes-LICENSE.txt`. Build dependencies are not loaded from a CDN or needed by the production server.
+Open http://localhost:3477. The first page creates a room; its address becomes the recipient URL. `npm run build` bundles the shared crypto protocol and the Node receiver source into `public/receive.mjs`, builds the browser file worker, and regenerates the brand images. Regenerate it after changes to these sources. The file worker uses the pinned `@noble/hashes` SHA-256 implementation; its MIT license is shipped as `public/hashes-LICENSE.txt`. Build dependencies are not loaded from a CDN or needed by the production server. The server reads and fingerprints `public/` when it starts, so restart it after changing those files.
 
 ```sh
 npm run check
@@ -76,6 +76,8 @@ Preview metadata is held only in room memory and removed when the sender leaves.
 ## Hosting
 
 Run the app as its own unprivileged service behind an HTTPS reverse proxy. It listens on `127.0.0.1:3477` by default; set `PORT` to change the port and `PUBLIC_ORIGIN` to the public HTTPS origin. Forward WebSocket upgrades for `/socket`, disable proxy buffering and caching, and allow idle WebSocket connections for at least 90 seconds. Use `/healthz` for health checks.
+
+Pages reference scripts, styles, and images as `/file?v=<version>`, where the version is the start of the file's SHA-256 after its own references are versioned. A module's version therefore changes when anything it imports changes. Only a request for the current version gets `Cache-Control: public, max-age=31536000, immutable`, which lets browsers and Cloudflare keep it; pages, status responses, and unversioned or outdated asset URLs stay `no-store`. Each release computes versions from its own files when the service starts, so a deploy gives every changed file a new URL without purging any cache. `/receive.mjs` stays available without a version for the command-line download.
 
 Cloudflare can proxy the domain and terminate public TLS. Use **Full (Strict)** with a valid certificate at the origin. Keep the application process and virtual host separate from other sites. A service restart ends active rooms, so preserve the previous release for rollback.
 
