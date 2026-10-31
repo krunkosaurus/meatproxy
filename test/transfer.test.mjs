@@ -65,6 +65,19 @@ test('each acknowledgement renews the others, so a slow link draining a full win
   assert.deepEqual(await Promise.all([first, last]), ['one', 'two']);
 });
 
+test('a receiver that stalls after some acknowledgements times out 30 s after the last one', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const waiters = createWaiters(30_000);
+  waiters.wait('ack:1');
+  let outcome = 'pending';
+  waiters.wait('ack:2').then(() => { outcome = 'resolved'; }, error => { outcome = error.message; });
+  t.mock.timers.tick(20_000); waiters.resolve('ack:1');
+  t.mock.timers.tick(29_999); await setImmediate();
+  assert.equal(outcome, 'pending');
+  t.mock.timers.tick(1); await setImmediate();
+  assert.match(outcome, /stopped responding/);
+});
+
 test('a receiver that stops acknowledging still times out, and a disconnect rejects every wait', async t => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
   const waiters = createWaiters(30_000);

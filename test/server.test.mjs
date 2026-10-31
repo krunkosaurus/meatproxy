@@ -324,8 +324,41 @@ test('a receiver that leaves while the relay holds the sender frees the link for
   const next = await connect(); const joined = message(next); const ownerJoined = message(owner);
   next.send(JSON.stringify({ type: 'join', room }));
   assert.equal((await joined).type, 'joined'); assert.equal((await ownerJoined).type, 'peer-joined');
+  const signalled = message(next); owner.send(JSON.stringify({ type: 'signal', payload: 'relay for the next session' }));
+  assert.equal((await signalled).type, 'signal');
   const delivery = once(next, 'message'); owner.send(Buffer.from('next recipient'));
   assert.equal((await delivery)[0].toString(), 'next recipient');
+});
+
+test('a new receiver never gets data the sender queued for the previous one', { timeout: 20000 }, async t => {
+  const { connect, owner, room, receiver } = await relayPair(t);
+  const left = message(owner); receiver.terminate(); assert.equal((await left).type, 'peer-left');
+  const next = await connect(); const joined = message(next); const ownerJoined = message(owner);
+  next.send(JSON.stringify({ type: 'join', room }));
+  assert.equal((await joined).type, 'joined'); assert.equal((await ownerJoined).type, 'peer-joined');
+  const delivered = []; next.on('message', (data, binary) => delivered.push(binary ? `binary:${data}` : JSON.parse(data).type));
+  // Ciphertext for the previous session can still be crossing a slow upload when the next receiver joins.
+  // The sender's first message for the new session is a signal, so it follows all of that data.
+  owner.send(Buffer.from('previous session'));
+  owner.send(JSON.stringify({ type: 'signal', payload: 'relay for the next session' }));
+  owner.send(Buffer.from('next session'));
+  await until(() => delivered.includes('binary:next session'), 'the next session to arrive');
+  assert.deepEqual(delivered, ['signal', 'binary:next session']);
+});
+
+test('the liveness check keeps a socket whose messages keep arriving and drops a silent one', { timeout: 20000 }, async t => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  const { url } = await setup(t);
+  // A slow upload can hold a sender's pong behind megabytes of file data; autoPong: false models that.
+  const open = async () => { const ws = new WebSocket(url, { origin: 'https://meatproxy.to', autoPong: false }); await once(ws, 'open'); const created = message(ws); ws.send(JSON.stringify({ type: 'create' })); await created; return ws; };
+  const busy = await open(), silent = await open();
+  const silentClosed = once(silent, 'close');
+  for (let tick = 0; tick < 3; tick++) {
+    await publish(busy, { count: 0, totalBytes: 0, names: [] });
+    t.mock.timers.tick(25_000);
+  }
+  await silentClosed;
+  assert.equal(busy.readyState, WebSocket.OPEN);
 });
 
 test('the liveness check drops a stalled receiver but keeps the sender the relay is holding', { timeout: 20000 }, async t => {

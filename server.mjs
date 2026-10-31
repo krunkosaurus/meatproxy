@@ -140,9 +140,12 @@ export function createApp({ origin = process.env.PUBLIC_ORIGIN, maxClients = 200
     const setupTimer = setTimeout(() => { if (!ws.room) ws.close(1008, 'Join a handoff first'); }, 10_000);
     ws.on('error', () => {}); // Errors are followed by close; close performs room cleanup.
     ws.on('message', (data, binary) => {
+      ws.alive = true; // A slow upload can hold the pong behind megabytes of file data.
       if (binary) {
         const peer = ws.owner ? ws.room?.guest : ws.room?.owner;
-        if (!peer || peer.readyState !== WebSocket.OPEN) return;
+        // After a receiver leaves, the sender's queued data for it can still be arriving.
+        // The sender's first message for the next receiver is a signal, which follows all of it.
+        if (!peer || peer.readyState !== WebSocket.OPEN || (ws.owner && ws.room.previousSession)) return;
         // Pausing lets TCP slow the sender's browser. Write callbacks also fire, with an
         // error, when the receiver's socket is destroyed, so a departed receiver releases it.
         peer.send(data, { binary: true }, () => { if (ws.isPaused && peer.bufferedAmount <= relayBufferBytes) ws.resume(); });
@@ -171,6 +174,7 @@ export function createApp({ origin = process.env.PUBLIC_ORIGIN, maxClients = 200
         ws.room.preview = { count: msg.count, totalBytes: msg.totalBytes, names: msg.names.map(name => name.replace(/[\x00-\x1f\x7f]/g, '').slice(0, 180)) };
       } else if (msg.type === 'signal' && ws.room && typeof msg.payload === 'string' && msg.payload.length <= 60_000) {
         const peer = ws.owner ? ws.room.guest : ws.room.owner;
+        if (ws.owner) ws.room.previousSession = false;
         send(peer, { type: 'signal', payload: msg.payload });
       } else if (msg.type === 'reject' && ws.owner && ws.room?.guest) {
         ws.room.guest.close(1008, 'Invalid link key');
@@ -185,7 +189,7 @@ export function createApp({ origin = process.env.PUBLIC_ORIGIN, maxClients = 200
         send(room.guest, { type: 'sender-left' });
         room.guest?.close(1000, 'Sender left');
       } else if (room.guest === ws) {
-        room.guest = null; send(room.owner, { type: 'peer-left' });
+        room.guest = null; room.previousSession = true; send(room.owner, { type: 'peer-left' });
       }
     });
   });
