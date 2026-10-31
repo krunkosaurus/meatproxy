@@ -197,7 +197,8 @@ export function createApp({ origin = process.env.PUBLIC_ORIGIN, maxClients = 200
   if (!/^https?:$/.test(publicOrigin.protocol) || (origin && publicOrigin.origin !== origin)) throw new Error(`PUBLIC_ORIGIN must be an origin such as https://meatproxy.to, not ${origin}`);
   const server = http.createServer((req, res) => {
     for (const header of Object.entries(securityHeaders)) res.setHeader(...header);
-    res.setHeader('Cache-Control', 'no-store');
+    // no-transform stops Cloudflare adding its analytics script to pages, which the CSP would block.
+    res.setHeader('Cache-Control', 'no-store, no-transform');
     let url;
     try { url = new URL(req.url, 'http://localhost'); } catch { res.writeHead(400).end(); return; } // For example, GET //[
     const path = url.pathname;
