@@ -92,6 +92,8 @@ function updateMobileAction() {
     label = isSender ? 'Sending…' : 'Receiving…'; disabled = true;
     summary = $('transfer-speed').textContent;
     amount = `${size(peer.done)} / ${size(peer.total)}`;
+  } else if (isSender && peer?.failed && !peer.closed) {
+    label = 'Transfer paused'; disabled = true; hint = 'Ask the recipient to reconnect.';
   } else if (isSender) {
     action = navigator.share ? 'share' : 'copy';
     label = preparing ? 'Adding files…' : navigator.share ? 'Share link ↗' : 'Copy link ↗';
@@ -398,7 +400,7 @@ function addFeedback(message) { $('add-feedback').textContent = message; $('add-
 function highlightShare(scroll = false) {
   $('share-card').classList.add('share-ready');
   $('share-title').textContent = 'Now share the link';
-  if (scroll && !$('copy-link').disabled) {
+  if (scroll && !$('copy-link').disabled && !matchMedia('(max-width: 759px)').matches) {
     $('copy-link').focus({ preventScroll: true });
     $('copy-link').scrollIntoView({ block: 'nearest', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
   }

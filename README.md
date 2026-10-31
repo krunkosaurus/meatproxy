@@ -10,7 +10,7 @@ Live at https://meatproxy.to. Files and notes move between two peers; the server
 
 Notes become `HANDOFF.md`. The receiving page can copy text for an agent. Nothing received is executed automatically.
 
-Added files appear immediately in an expanded list, the drop area becomes **Add more**, and the share card highlights the next step. Selecting the same filename and contents again does not add a duplicate; different contents with the same filename are retained. During transfer, both browsers show recent KB/s or MB/s and an approximate time remaining. Sender progress counts receiver-confirmed bytes, and completion still requires SHA-256 verification.
+Added files appear in an expanded list after preparation, the drop area becomes **Add more**, and the share card highlights the next step. Selecting the same filename and contents again does not add a duplicate; different contents with the same filename are retained. During transfer, both browsers show recent KB/s or MB/s and an approximate time remaining. Sender progress counts receiver-confirmed bytes, and completion still requires SHA-256 verification.
 
 On phones, a fixed action bar keeps sharing, transfer progress, and saving within reach as the file list grows. It opens native link sharing when available and otherwise copies the link. The bar includes the keep-open reminder and leaves room for the page content and device safe area. Filename-preview controls are under **Link preview options**.
 
