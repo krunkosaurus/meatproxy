@@ -10,6 +10,7 @@ const publicDir = new URL('./public/', import.meta.url);
 const assets = new Map([
   ['/app.js', ['app.js', 'text/javascript; charset=utf-8']],
   ['/protocol.js', ['protocol.js', 'text/javascript; charset=utf-8']],
+  ['/transfer.js', ['transfer.js', 'text/javascript; charset=utf-8']],
   ['/style.css', ['style.css', 'text/css; charset=utf-8']],
   ['/logo.svg', ['logo.svg', 'image/svg+xml; charset=utf-8']],
   ['/favicon.svg', ['favicon.svg', 'image/svg+xml; charset=utf-8']],

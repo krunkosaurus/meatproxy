@@ -50,6 +50,20 @@ h2 { font-size: 18px; line-height: 1.4; letter-spacing: -.3px; margin: 0; font-w
 .dropzone svg { width: 36px; height: 36px; margin-bottom: 4px; }
 .dropzone strong { font-size: 18px; font-weight: 650; }
 .dropzone span { color: var(--muted); }
+.has-files .dropzone { min-height: 50px; padding: 12px; }
+.has-files .dropzone svg, .has-files .dropzone span { display: none; }
+.has-files .dropzone strong { font-size: 16px; }
+.has-files .dropzone:not(:disabled) strong::before { content: '+ '; }
+.has-files #content-step { background: #eef2e6; color: var(--green); }
+.add-feedback { margin: 14px 0 0; overflow-wrap: anywhere; color: var(--muted); }
+.share-ready { border-color: var(--orange); box-shadow: 0 0 0 3px #b9432d18; animation: share-glow 1.2s ease-in-out 2; }
+.share-ready .step { background: var(--orange); color: var(--white); }
+@keyframes share-glow {
+  50% { box-shadow: 0 0 0 7px #b9432d30; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .share-ready { animation: none; }
+}
 .limit { margin: 12px 0 0; color: var(--muted); font-size: 14px; text-align: center; }
 textarea { resize: vertical; width: 100%; min-height: 130px; padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--white); color: var(--ink); line-height: 1.5; }
 textarea::placeholder { color: var(--muted); opacity: 1; }
@@ -79,11 +93,11 @@ progress { display: block; width: 100%; height: 8px; margin: 18px 0 8px; border:
 progress::-webkit-progress-bar { background: #e9ecdf; border-radius: 8px; }
 progress::-webkit-progress-value { background: var(--green); border-radius: 8px; }
 .transfer-meta { font-size: 14px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.transfer-speed { margin: 10px 0 4px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .transfer-meta:empty { display: none; }
 #retry { margin-top: 16px; }
-.queued-files { margin-top: 16px; border-top: 1px solid var(--line); padding-top: 4px; }
+.queued-files { margin-top: 16px; }
 summary { cursor: pointer; min-height: 44px; padding-block: 10px; }
-.queued-files summary { color: var(--green); font-weight: 600; }
 .file-list { max-height: 360px; overflow: auto; }
 .file-row { display: flex; align-items: center; gap: 10px; padding-block: 12px; border-top: 1px solid var(--line); }
 .file-icon { flex-shrink: 0; min-width: 40px; padding: 8px 4px; text-align: center; color: var(--green); background: #eef2e6; border-radius: 6px; font-size: 14px; }

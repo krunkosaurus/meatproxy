@@ -51,7 +51,7 @@
           <div id="files-panel" role="tabpanel" aria-labelledby="files-tab">
             <button class="dropzone" id="dropzone" type="button" aria-label="Choose files">
               <svg viewBox="0 0 40 40" aria-hidden="true"><path d="M20 27V7m-7 7 7-7 7 7M9 26v7h22v-7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-              <strong>Choose files</strong><span>or drop them here</span>
+              <strong id="dropzone-label">Choose files</strong><span>or drop them here</span>
             </button>
             <input id="file-input" type="file" multiple hidden>
           </div>
@@ -61,6 +61,7 @@
             <button class="secondary" id="add-note">Add note</button>
           </div>
           <p class="limit">Any file type · Up to 512 MB</p>
+          <p id="add-feedback" class="add-feedback" role="status" hidden></p>
         </div>
         <div id="receive-invite" class="receive-invite" hidden>
           <p id="invite-summary">Checking this live link…</p>
@@ -69,17 +70,16 @@
           <p class="invite-help">Receive from the sender’s browser. Both of you need to stay online.</p>
         </div>
         <div id="receive-intro" class="receive-intro" hidden><span class="receive-mark" aria-hidden="true">↓</span><p>Your files will appear here.</p></div>
-        <details id="queued-files" class="queued-files" hidden>
-          <summary id="file-count" aria-live="polite">0 files added</summary>
+        <div id="queued-files" class="queued-files" hidden>
           <div class="file-list" id="file-list" aria-label="Files"></div>
-        </details>
+        </div>
         <div id="receive-actions" class="receive-actions" hidden>
           <button id="download-all" class="primary" disabled>Save all files ↓</button>
           <button id="copy-agent" class="secondary" disabled>Copy notes</button>
         </div>
       </section>
       <div class="side-column">
-        <section class="card share-card" aria-labelledby="share-title">
+        <section class="card share-card" id="share-card" aria-labelledby="share-title">
           <div class="card-top"><span class="step" id="share-step" aria-hidden="true">2</span><h2 id="share-title">Share the link</h2></div>
           <div id="share-controls">
             <label for="share-link" class="sr-only">Private sharing link</label>
@@ -91,6 +91,7 @@
           <p class="keep-open" id="keep-open-text">Keep this tab open until sent.</p>
           <div class="status-block" role="status"><span class="status-dot" id="status-dot" aria-hidden="true"></span><div><strong id="status">Creating your link…</strong><p id="status-detail"></p></div></div>
           <progress id="progress" value="0" max="100" hidden aria-label="Transfer progress"></progress>
+          <p class="transfer-speed" id="transfer-speed" hidden></p>
           <div class="transfer-meta" id="transfer-meta"></div>
           <button id="retry" class="secondary" hidden>Reconnect</button>
         </section>
@@ -106,7 +107,7 @@
     <p class="notice" id="notice" role="alert" hidden></p>
   </main>
   <footer>
-    <details><summary>How it works</summary><p>Open a link and choose Accept files to start the peer-to-peer transfer. Keep both tabs open until it finishes, then save your files.</p><p>Files and notes are encrypted. They travel directly when possible, or through an encrypted relay. Files are never stored on our server.</p><p>Link previews show availability, file count and total size. Filenames stay private unless the sender enables them in previews. Chat apps may cache previews; open the link to check the sender’s status.</p><p>Anyone with the complete link can receive. One recipient at a time, up to 100 files and 512 MB. Links expire when the sender leaves or after 12 hours.</p></details>
+    <details><summary>How it works</summary><p>Open a link and choose Accept files to start the peer-to-peer transfer. Keep both tabs open until it finishes, then save your files.</p><p>Files and notes are encrypted. They travel directly when possible, or through an encrypted relay. Files are never stored on our server.</p><p>Direct connections can reveal your IP address to the other person. Encryption protects file contents, not network addresses. An automatic relay fallback does not undo addresses already shared while trying to connect.</p><p>Link previews show availability, file count and total size. Filenames stay private unless the sender enables them in previews. Chat apps may cache previews; open the link to check the sender’s status.</p><p>Anyone with the complete link can receive. One recipient at a time, up to 100 files and 512 MB. Links expire when the sender leaves or after 12 hours.</p></details>
     <a href="https://github.com/krunkosaurus/meatproxy" target="_blank" rel="noopener noreferrer">GitHub ↗</a>
   </footer>
   <noscript>Meatproxy needs JavaScript to encrypt and send files between browsers.</noscript>

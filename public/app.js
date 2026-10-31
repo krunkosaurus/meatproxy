@@ -1,4 +1,5 @@
 import { MAX_BYTES, MAX_FILES, CHUNK_BYTES, makeSecret, importSecret, encrypt, decrypt, encodeJSON, decodeJSON, toBase64, fromBase64, digest, validateManifest } from './protocol.js';
+import { streamFile, TransferMeter, waitForDataChannel } from './transfer.js';
 
 const $ = id => document.getElementById(id);
 const isSender = location.pathname === '/';
@@ -44,10 +45,20 @@ async function checkInvite() {
   }
   if (state !== 'offline') previewTimer = setTimeout(checkInvite, 10_000);
 }
-function progress(done, total) {
-  $('progress').hidden = total === 0; $('progress').value = total ? done / total * 100 : 0;
-  $('transfer-meta').textContent = total ? `${size(done)} of ${size(total)} · ${peer?.transport === 'direct' ? 'Direct connection' : 'Encrypted relay'}` : '';
+function startProgress(p) {
+  p.meter = new TransferMeter(p.done); p.progressActive = true; progress(p);
 }
+function progress(p, finished = false) {
+  const { done, total } = p;
+  $('progress').hidden = total === 0; $('progress').value = total ? done / total * 100 : 0;
+  $('transfer-meta').textContent = total ? `${size(done)} of ${size(total)} · ${p.transport === 'direct' ? 'Direct connection' : 'Encrypted relay'}` : '';
+  $('transfer-speed').hidden = total === 0;
+  const stats = p.meter.update(done, total);
+  const eta = stats.remaining < 60 ? `${stats.remaining} s` : stats.remaining < 3600 ? `${Math.ceil(stats.remaining / 60)} min` : `${Math.ceil(stats.remaining / 3600)} hr`;
+  $('transfer-speed').textContent = finished ? `${size(stats.average)}/s average · Complete` : done === total ? 'Verifying files…' : stats.rate === null ? 'Estimating speed and time…' : stats.rate === 0 ? '0 B/s · Waiting for data…' : `${size(stats.rate)}/s · About ${eta} left`;
+  if (finished) p.progressActive = false;
+}
+setInterval(() => { if (peer?.progressActive && !peer.closed && !peer.failed) progress(peer); }, 500);
 function fail(error) {
   const message = error instanceof Error ? error.message : String(error);
   notice(message); status('The handoff paused', message, 'error');
@@ -97,6 +108,8 @@ async function onSignal(payload) {
     if (p.session) return;
     if (typeof message.session !== 'string' || !/^[a-f0-9-]{36}$/.test(message.session)) return;
     p.session = message.session;
+    clearShareHighlight();
+    $('lead').textContent = 'Keep this tab open until your files are sent.';
     status('Recipient joined', 'Connecting…', 'active');
     if (message.relay || !window.RTCPeerConnection) { await requestRelay(p); return; }
     try {
@@ -138,11 +151,16 @@ function sendPayload(p, type, bytes) {
     view.setUint32(0, p.outSeq++); plain[4] = type; plain.set(bytes, 5);
     const encoded = await encrypt(key, plain, `data:${room}:${p.session}:${isSender ? 'sender' : 'receiver'}`);
     const channel = p.transport === 'direct' ? p.dc : ws;
-    const deadline = Date.now() + 30_000;
-    while (channel.bufferedAmount > 256 * 1024) {
-      if (p.closed || p.failed || Date.now() > deadline) throw new Error('The receiver stopped responding. Reconnect and try again.');
-      await delay(20);
+    if (p.transport === 'direct') {
+      if (channel.bufferedAmount > 256 * 1024) await waitForDataChannel(channel);
+    } else {
+      const deadline = Date.now() + 30_000;
+      while (channel.bufferedAmount > 256 * 1024) {
+        if (p.closed || p.failed || Date.now() > deadline) throw new Error('The receiver stopped responding. Reconnect and try again.');
+        await delay(20);
+      }
     }
+    if (p.closed || p.failed) throw new Error('The connection ended.');
     if (p.transport === 'direct' ? channel.readyState !== 'open' : channel.readyState !== WebSocket.OPEN) throw new Error('The connection closed during transfer.');
     channel.send(encoded);
   });
@@ -159,7 +177,6 @@ function receivePacket(p, raw) {
       const data = plain.slice(5); const item = p.incoming;
       if (item.offset + data.length > item.meta.size) throw new Error('The incoming file exceeds its declared size.');
       item.bytes.set(data, item.offset); item.offset += data.length; p.done += data.length;
-      progress(p.done, p.total);
       if (item.offset % (CHUNK_BYTES * 16) === 0) await sendControl(p, { type: 'ack', id: item.meta.id, offset: item.offset });
     } else throw new Error('An unexpected transfer packet arrived.');
   }).catch(fail);
@@ -178,7 +195,7 @@ async function onControl(p, message) {
   else if (message.type === 'manifest' && !isSender) {
     const manifest = validateManifest(message.files, files);
     files.splice(0, files.length, ...manifest.map(meta => ({ ...meta, state: received.has(meta.id) ? 'Received · verified' : 'Waiting…' })));
-    p.total = manifest.reduce((sum, file) => sum + file.size, 0); renderFiles();
+    p.total = manifest.reduce((sum, file) => sum + file.size, 0); renderFiles(); startProgress(p);
     if (!manifest.length) status('Connected. Waiting for files.', 'The sender can add files or a note at any time.', 'active');
   } else if (message.type === 'start' && !isSender) {
     const meta = files.find(file => file.id === message.id);
@@ -202,55 +219,91 @@ async function onControl(p, message) {
       $('lead').textContent = 'Save them below or copy the notes.';
       $('keep-open-text').textContent = 'Save your files before closing this tab.';
     }
-    progress(p.total, p.total); $('receive-intro').hidden = files.length > 0;
+    progress(p, true); $('receive-intro').hidden = files.length > 0;
   }
 }
 async function pump(p) {
   if (!p.ready || p.sending || p.closed || p.failed || preparing) return;
   p.sending = true;
+  p.total = files.reduce((sum, file) => sum + file.size, 0); startProgress(p);
   try {
     await sendControl(p, { type: 'manifest', files: files.map(({ id, name, size, sha256 }) => ({ id, name, size, sha256 })) });
     for (const file of files) {
       if (p.sent.has(file.id)) continue;
       file.state = 'Sending…'; renderFiles(); status(`Sending ${file.name}`, 'Keep this tab open. The receiver is getting your file.', 'active');
       await sendControl(p, { type: 'start', id: file.id });
-      for (let offset = 0; offset < file.size; offset += CHUNK_BYTES) {
-        const end = Math.min(offset + CHUNK_BYTES, file.size);
-        const ack = end % (CHUNK_BYTES * 16) === 0 ? waitFor(p, `ack:${file.id}:${end}`) : null;
-        await sendPayload(p, 1, new Uint8Array(await file.file.slice(offset, end).arrayBuffer()));
-        p.done += end - offset;
-        progress(p.done, files.reduce((sum, item) => sum + item.size, 0));
-        if (ack) await ack;
-      }
+      const base = p.done;
+      await streamFile(file.file, {
+        transport: p.transport,
+        send: bytes => sendPayload(p, 1, bytes),
+        waitForAck: offset => waitFor(p, `ack:${file.id}:${offset}`),
+        onConfirmed: offset => { p.done = base + offset; },
+      });
       const done = waitFor(p, `done:${file.id}`);
       await sendControl(p, { type: 'end', id: file.id });
-      await done; p.sent.add(file.id); file.state = 'Delivered · verified'; renderFiles();
+      await done; p.done = base + file.size; p.sent.add(file.id); file.state = 'Delivered · verified'; renderFiles();
     }
     await sendControl(p, { type: 'complete' });
+    progress(p, true);
     status(files.length ? 'All files sent' : 'Recipient connected', files.length ? 'You can add more or close this tab.' : 'Add files or a note to send them.', 'active');
   } finally { p.sending = false; }
 }
 async function addFiles(incoming) {
-  if (preparing) { notice('A file is still being prepared. Try adding the next files in a moment.'); return; }
-  if (peer?.sending) { notice('Wait for the current transfer to finish before adding more files.'); return; }
-  const count = files.length + incoming.length;
-  if (count > MAX_FILES) { notice(`This handoff would contain ${count} files. The limit is ${MAX_FILES}.`); return; }
-  const total = [...files, ...incoming].reduce((sum, file) => sum + file.size, 0);
-  if (total > MAX_BYTES) { notice(`This handoff would total ${size(total)}. The limit is ${size(MAX_BYTES)}.`); return; }
-  preparing = true; notice(''); $('add-note').disabled = true;
+  if (preparing) { addFeedback('Still adding your files…'); return; }
+  if (peer?.sending) { addFeedback('Wait for this transfer to finish before adding more.'); return; }
+  const firstAddition = files.length === 0;
+  const additions = [];
+  let duplicates = 0, total = files.reduce((sum, file) => sum + file.size, 0);
+  preparing = true; notice(''); renderFiles();
   try {
     for (const file of incoming) {
+      addFeedback(`Adding ${file.name}…`);
+      // Reject an oversized file before reading it into browser memory.
+      if (file.size > MAX_BYTES) throw new Error(`This file is ${size(file.size)}. The limit is ${size(MAX_BYTES)}.`);
       const sha256 = await digest(await file.arrayBuffer());
-      files.push({ id: crypto.randomUUID(), file, name: file.name, size: file.size, sha256, state: 'Ready to send' });
+      if ([...files, ...additions].some(item => item.name === file.name && item.size === file.size && item.sha256 === sha256)) { duplicates++; continue; }
+      const count = files.length + additions.length + 1;
+      if (count > MAX_FILES) throw new Error(`This handoff would contain ${count} files. The limit is ${MAX_FILES}.`);
+      total += file.size;
+      if (total > MAX_BYTES) throw new Error(`This handoff would total ${size(total)}. The limit is ${size(MAX_BYTES)}.`);
+      additions.push({ id: crypto.randomUUID(), file, name: file.name, size: file.size, sha256, state: 'Ready to send' });
     }
-    renderFiles(); publishPreview();
-    if (!peer?.ready) status('Ready to send', 'They open the link and accept your files.', 'active');
-  } catch (error) { fail(error); }
-  finally { preparing = false; $('add-note').disabled = false; }
+    files.push(...additions);
+  } catch (error) { addFeedback(error.message); return; }
+  finally { preparing = false; renderFiles(); }
+  addFeedback(duplicates ? additions.length ? 'Skipped files already in this handoff.' : 'Already added. Check the list below.' : '');
+  if (!additions.length) return;
+  publishPreview();
+  if (!peer?.ready) {
+    status('Ready to send', 'They open the link and accept your files.', 'active');
+    $('lead').textContent = 'Files added. Copy the link to send them.';
+    highlightShare(firstAddition);
+  }
   if (peer?.ready) pump(peer).catch(fail);
 }
+function addFeedback(message) { $('add-feedback').textContent = message; $('add-feedback').hidden = !message; }
+function highlightShare(scroll = false) {
+  $('share-card').classList.add('share-ready');
+  $('share-title').textContent = 'Now share the link';
+  if (scroll && !$('copy-link').disabled) {
+    $('copy-link').focus({ preventScroll: true });
+    $('copy-link').scrollIntoView({ block: 'nearest', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
+  }
+}
+function clearShareHighlight() {
+  $('share-card').classList.remove('share-ready');
+  $('share-title').textContent = 'Share the link';
+}
 function renderFiles() {
-  $('file-count').textContent = `${files.length} ${files.length === 1 ? 'file' : 'files'} added`;
+  if (isSender) {
+    document.body.classList.toggle('has-files', files.length > 0);
+    $('content-title').textContent = files.length ? `${files.length} ${files.length === 1 ? 'file' : 'files'} added` : 'Add files or a note';
+    $('content-step').textContent = files.length ? '✓' : '1';
+    $('dropzone-label').textContent = preparing ? 'Adding…' : files.length ? 'Add more' : 'Choose files';
+    $('dropzone').setAttribute('aria-label', preparing ? 'Adding files' : files.length ? 'Add more files' : 'Choose files');
+    $('dropzone').setAttribute('aria-busy', String(preparing));
+    $('dropzone').disabled = preparing; $('add-note').disabled = preparing;
+  }
   $('download-all').textContent = received.size === 1 ? 'Save file ↓' : 'Save all files ↓';
   $('queued-files').hidden = files.length === 0;
   if (!isSender) $('receive-intro').hidden = files.length > 0;
@@ -284,7 +337,8 @@ async function connect() {
         room = msg.room; history.replaceState(null, '', `/s/${room}#${secret}`);
         $('share-link').value = location.href; $('copy-link').disabled = false;
         updateCommand(); publishPreview();
-        status('Ready when you are', '', 'active');
+        status(files.length ? 'Ready to send' : 'Ready when you are', '', 'active');
+        if (files.length && !peer?.ready) highlightShare(true);
       } else if (msg.type === 'peer-joined') newPeer();
       else if (msg.type === 'joined') {
         const p = newPeer(); p.session = crypto.randomUUID();
@@ -307,16 +361,22 @@ async function connect() {
   ws.onclose = () => {
     if (!ended) {
       if (peer?.transport === 'direct' && peer.dc?.readyState === 'open') { notice('The link service disconnected. Your current direct transfer can continue, but new recipients need a fresh link.'); return; }
+      if (peer) peer.progressActive = false;
       status('Connection closed', isSender ? 'Start a new handoff to make a fresh link.' : 'Save any completed files, then reconnect.', 'error');
       $('retry').hidden = isSender;
     }
   };
 }
 async function copy(text, button, label) {
-  try { await navigator.clipboard.writeText(text); button.textContent = 'Copied!'; setTimeout(() => { button.textContent = label; }, 1800); }
+  try { await navigator.clipboard.writeText(text); button.textContent = 'Copied!'; setTimeout(() => { button.textContent = label; }, 1800); return true; }
   catch { notice('Clipboard access was blocked. Select and copy the link from the field above.'); }
 }
-$('copy-link').onclick = () => copy($('share-link').value, $('copy-link'), 'Copy link ↗');
+$('copy-link').onclick = async () => {
+  if (await copy($('share-link').value, $('copy-link'), 'Copy link ↗')) {
+    clearShareHighlight();
+    $('lead').textContent = 'Link copied. Send it and keep this tab open.';
+  }
+};
 $('copy-command').onclick = () => copy($('agent-command').textContent, $('copy-command'), 'Copy command');
 const inputTabs = [$('files-tab'), $('note-tab')];
 function selectInputTab(tab) {
@@ -384,7 +444,6 @@ if (!isSender) {
   $('lead').textContent = 'Accept to receive them from the sender.';
   $('content-title').textContent = 'Peer-to-peer handoff'; $('share-title').textContent = 'Live connection';
   $('content-step').hidden = true; $('share-step').hidden = true; $('share-controls').hidden = true;
-  $('queued-files').open = true; $('file-count').hidden = true;
   $('keep-open-text').textContent = 'Files only transfer after you accept.';
   $('agent-title').textContent = 'Receive with an agent';
   $('agent-tip').textContent = 'Close this receiving tab before running the command. Keep the sender’s tab open. Files are saved, never run.';

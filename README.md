@@ -10,6 +10,8 @@ Live at https://meatproxy.to. Files and notes move between two peers; the server
 
 Notes become `HANDOFF.md`. The receiving page can copy text for an agent. Nothing received is executed automatically.
 
+Added files appear immediately in an expanded list, the drop area becomes **Add more**, and the share card highlights the next step. Selecting the same filename and contents again does not add a duplicate; different contents with the same filename are retained. During transfer, both browsers show recent KB/s or MB/s and an approximate time remaining. Sender progress counts receiver-confirmed bytes, and completion still requires SHA-256 verification.
+
 The current prototype supports 100 files, 512 MiB total, and one connected recipient per link. A second recipient can connect after the first leaves. Links expire when the sender closes/reloads their page, the signaling connection ends, or 12 hours elapse. Sender file handles are held only in the page; refreshing cannot restore them. Files added after the initial delivery are sent while the receiver stays connected. During an active transfer, the UI asks the sender to wait before adding more files; these additions are not queued.
 
 The browser receiver holds completed files in memory. Large handoffs are best tested on desktop. Mobile backgrounding, device sleep, Safari, and Firefox have not yet been verified. This prototype restarts interrupted transfers rather than resuming partial files. Folder hierarchy is not preserved.
@@ -42,6 +44,8 @@ npm test
 
 For a real browser fallback test, keep the normal server running and run `node test/blocked-direct-proxy.mjs`. Open http://localhost:3478 in two browser tabs. The fixture suppresses initial WebRTC signaling so the production browser code must fall back to the encrypted relay after eight seconds. This test fixture is not deployed.
 
+For a repeatable latency benchmark, run `node test/latency-proxy.mjs` with the normal server running. Open http://localhost:3479 and receive its complete link with the Node client. The fixture adds 50 ms per WebSocket hop, producing approximately 200 ms of added round-trip latency between the two peers. It is not deployed.
+
 ## Branding and link previews
 
 The two folded pieces in `public/logo.svg` form the Meatproxy M. `npm run build:brand` generates the matching SVG/PNG favicons, Apple touch icon, and 1200 × 630 social images from this mark, `brand/social.svg`, and `brand/handoff.svg`. The renderer is a development dependency; the server only serves the finished assets. The bundled Atkinson Hyperlegible fonts are licensed under the [SIL Open Font License](brand/fonts/OFL.txt), sourced from [Google Fonts](https://github.com/google/fonts/tree/main/ofl/atkinsonhyperlegible).
@@ -55,9 +59,10 @@ Preview metadata is held only in room memory and removed when the sender leaves.
 - A 128-bit random room ID locates a live sender. A separate 256-bit key is carried in the URL fragment; the application never transmits that key to the server.
 - AES-GCM encrypts signaling, the transfer manifest, notes, and file chunks. Filenames are also published separately only when the sender opts into filename previews. Each encrypted packet uses a random 96-bit IV; data packets also bind the room, fresh connection ID, direction, and ordered sequence.
 - The browser tries an ordered WebRTC data channel using Cloudflare's public STUN service. If the connection cannot be established within eight seconds, the same encrypted payloads travel over a WebSocket relay. No TURN account is required.
-- Files are streamed in 16 KiB chunks, with receiver acknowledgements every 256 KiB and a SHA-256 check at completion. WebSocket and data-channel buffers are bounded.
+- Files are read in 1 MiB blocks and streamed in 16 KiB encrypted chunks. Receivers acknowledge each 256 KiB; senders pipeline these acknowledgements with at most 4 MiB outstanding for direct transfers or 768 KiB for the relay, below its 1 MiB buffer limit. Files that fit the window stream through to the final checksum without stopping for intermediate acknowledgements. Direct transfers resume on WebRTC's buffer-drain event instead of polling a timer. Every completed file is SHA-256 verified. WebSocket and data-channel buffers remain bounded.
 - The relay never writes transferred files to disk. Room state is in process memory. The Nginx vhost disables access logs; error logs can still contain connection metadata. Cloudflare may retain traffic metadata under the account's policies.
 - Anyone holding the complete link can receive the handoff. This is a capability link, not verified recipient identity. The web application and code delivered by the origin/Cloudflare remain trusted; encryption does not protect against a compromised application delivering malicious JavaScript.
+- Direct WebRTC can expose network addresses to the other peer; see [WebRTC IP address handling](https://www.rfc-editor.org/rfc/rfc8828). Falling back to a relay after trying direct does not retract addresses already shared during connection setup. A relay-only mode would need to avoid direct setup from the start; this version defaults to direct and has no such privacy switch. Relaying adds a server path and bandwidth costs, but does not inherently halve throughput because data is forwarded as it arrives.
 - Public resource limits: at most 200 connected sockets, 64 KiB per WebSocket message, 1 MiB outbound buffering per peer, a 12-hour room lifetime, and a 10-second initial handshake deadline. The service has CPU and memory limits to protect the shared host.
 
 ## Hosting
