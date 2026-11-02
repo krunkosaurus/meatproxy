@@ -79,20 +79,23 @@ const relayLimits = {
   addressSignals: 16 * 1024 * 1024,
   networkSignals: 256 * 1024 * 1024,
   room: 2 * 1024 ** 3, // Per link, over its 12-hour life.
-  addressDaily: 1024 ** 3,
-  networkDaily: 4 * 1024 ** 3,
+  // A full 512 MiB handoff counts about 515 MiB, and its start check needs nine 64 MiB slices free,
+  // so an address can receive two a day.
+  addressDaily: 1152 * 1024 * 1024,
+  networkDaily: 4608 * 1024 * 1024,
   daily: 10 * 1024 ** 3,
 };
 // A network may hold four addresses' worth, so one neighbour cannot fill it, and filling the
 // 200-socket cap takes seven networks.
 const connectionLimits = { address: 8, network: 32 };
-// Server work each address and network may cause, in bytes per second, so one client cannot take the
-// service's CPU; each may run two seconds ahead. Measured: about 2 µs per WebSocket message plus 0.7 ns
-// per byte, 40 µs to render a page and 75 µs to open a connection. So a message costs its size plus
-// 4 KiB, a request 64 KiB and a connection 128 KiB. An address's budget relays file chunks at about
-// 12 MiB/s, above the relay speeds seen in production, and a network may do four addresses' worth.
+// Server work each address and network may cause through its sockets, in bytes per second, so one
+// client cannot take the service's CPU; each may run two seconds ahead and owe two seconds' worth.
+// Measured: about 2 µs per WebSocket frame plus 0.7 ns per byte, so a message, ping or pong costs its
+// size plus 4 KiB. An address's budget relays file chunks at about 12 MiB/s, above the relay speeds
+// seen in production, and a network may do four addresses' worth. Refusing a request costs about as
+// much as serving it, so request and connection rates are left to the proxy (see README).
 const workLimits = { address: 16 * 1024 * 1024, network: 64 * 1024 * 1024 };
-const workCosts = { message: 4 * 1024, request: 64 * 1024, connection: 128 * 1024 };
+const frameCost = 4 * 1024;
 // Pages word these close codes for their reader; the reasons are for the command-line receiver.
 const refusals = {
   handoff: [4001, 'Relay limit reached for this handoff'],
@@ -171,9 +174,10 @@ export function createApp({ origin = process.env.PUBLIC_ORIGIN, maxClients = 200
     entry.level = Math.min(2 * rate, entry.level + (now - entry.at) / 1000 * rate); entry.at = now;
     credit.set(key, entry); return entry;
   });
-  const inDebt = keys => credits(keys).some(entry => entry.level < 0);
   // Charges work and returns the milliseconds until the address and its network are both back in credit.
-  const work = (keys, cost) => Math.max(0, ...credits(keys).map(entry => { entry.level -= cost; return -entry.level / entry.rate * 1000; }));
+  // Debt stops at two seconds' worth, so a burst from one address cannot hold its network's sockets for longer.
+  const work = (keys, cost) => Math.max(0, ...credits(keys).map(entry => { entry.level = Math.max(-2 * entry.rate, entry.level - cost); return -entry.level / entry.rate * 1000; }));
+  const spendFrame = (ws, bytes) => { const wait = work(ws.keys, bytes + frameCost); if (wait) throttle(ws, wait); };
   // A socket in debt is not read until it is back in credit, so TCP slows the client instead of the
   // service doing its work. Messages already read keep adding debt after the pause, so the wait is
   // checked again when it ends. The relay may also be holding the socket; reading resumes when neither applies.
@@ -182,8 +186,8 @@ export function createApp({ origin = process.env.PUBLIC_ORIGIN, maxClients = 200
     if (!ws.slowed) { ws.slowed = true; tally().throttled++; } // Sockets, not pauses: a fast transfer pauses often.
     ws.throttled = true; ws.held = true; ws.pause();
     const check = () => {
-      if (ws.readyState !== WebSocket.OPEN) return;
-      const remaining = work(ws.keys, 0);
+      if (ws.readyState === WebSocket.CLOSED) return;
+      const remaining = ws.readyState === WebSocket.OPEN ? work(ws.keys, 0) : 0; // A closing socket reads the close reply at once.
       if (remaining) { setTimeout(check, Math.ceil(remaining)).unref(); return; }
       ws.throttled = false; if (!backlogged(peerOf(ws))) ws.resume();
     };
@@ -209,8 +213,9 @@ export function createApp({ origin = process.env.PUBLIC_ORIGIN, maxClients = 200
   // slices still stop it. The unused part of the last slice returns when the receiver leaves.
   const charge = (receiver, bytes) => {
     if (!receiver.reservation) {
-      // Plus encryption and per-message overhead: 97 bytes per 16 KiB chunk, and acknowledgements.
-      const declared = Math.ceil(receiver.room.preview.totalBytes * 1.007);
+      // Plus encryption and per-message overhead (97 bytes per 16 KiB chunk, and acknowledgements), and
+      // each file's manifest entry and start, end and receipt messages.
+      const declared = Math.ceil(receiver.room.preview.totalBytes * 1.007) + 2048 * receiver.room.preview.count;
       const need = Math.ceil(declared / limit.slice) * limit.slice; // Slices are taken whole.
       if (receiver.room.relayed + need > limit.room) return refusals.link;
       const refusal = short(receiver.keys, need);
@@ -250,9 +255,6 @@ export function createApp({ origin = process.env.PUBLIC_ORIGIN, maxClients = 200
     for (const header of Object.entries(securityHeaders)) res.setHeader(...header);
     // no-transform stops Cloudflare adding its analytics script to pages, which the CSP would block.
     res.setHeader('Cache-Control', 'no-store, no-transform');
-    const keys = req.headers['x-real-ip'] ? addressKeys(req.headers['x-real-ip']) : null;
-    if (inDebt(keys)) { tally().refused++; res.writeHead(429, { 'Retry-After': '1' }).end(); return; }
-    work(keys, workCosts.request);
     let url;
     try { url = new URL(req.url, 'http://localhost'); } catch { res.writeHead(400).end(); return; } // For example, GET //[
     const path = url.pathname;
@@ -275,7 +277,9 @@ export function createApp({ origin = process.env.PUBLIC_ORIGIN, maxClients = 200
     if (handoff) body = renderPreview(body.toString(), previewOf(rooms.get(handoff[1])), new URL(path, publicOrigin).href);
     res.end(req.method === 'HEAD' ? undefined : body);
   });
-  const wss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024, perMessageDeflate: false });
+  // Pings and pongs are charged like messages, and pings answered only while the socket keeps up; a message
+  // may have at most 16 fragments, so splitting one into thousands of empty frames cannot avoid its charge.
+  const wss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024, perMessageDeflate: false, autoPong: false, maxFragments: 16 });
   const send = (socket, value) => {
     if (socket?.readyState === WebSocket.OPEN) {
       if (socket.bufferedAmount > 1024 * 1024) { socket.close(1008, 'Connection is too slow'); return; }
@@ -295,10 +299,9 @@ export function createApp({ origin = process.env.PUBLIC_ORIGIN, maxClients = 200
     const held = key => connections.get(key) || 0;
     const refused = keys && (held(keys.address) >= maxConnections.address || held(keys.network) >= maxConnections.network);
     // A few extra sockets open only to be closed with a reason the page can show; beyond that, 429.
-    if (inDebt(keys) || (keys && held(keys.address) >= 2 * maxConnections.address) || (refused && refusing >= maxRefusing)) {
+    if ((keys && held(keys.address) >= 2 * maxConnections.address) || (refused && refusing >= maxRefusing)) {
       tally().refused++; socket.end('HTTP/1.1 429 Too Many Requests\r\nConnection: close\r\n\r\n'); return;
     }
-    work(keys, workCosts.connection);
     // Counted from the handshake until the socket closes, so refused or lingering sockets cannot pile up.
     // Refused sockets count only toward their own address, so they cannot fill the network for its neighbours.
     const counted = !keys ? [] : refused ? [keys.address] : [keys.address, keys.network];
@@ -308,7 +311,7 @@ export function createApp({ origin = process.env.PUBLIC_ORIGIN, maxClients = 200
     wss.handleUpgrade(req, socket, head, ws => {
       ws.keys = keys;
       if (!refused) { wss.emit('connection', ws); return; }
-      ws.on('error', () => {}); closeWith(ws, refusals.connections);
+      ws.on('error', () => {}); closeWith(ws, refusals.connections); ws.pause(); // Never read; terminated below.
       setTimeout(() => ws.terminate(), 2000).unref();
     });
   });
@@ -316,14 +319,13 @@ export function createApp({ origin = process.env.PUBLIC_ORIGIN, maxClients = 200
     ws.alive = true; ws.held = false; ws.throttled = false; ws.relayQueue = 0;
     ws.toReceiver = 0; ws.toSender = 0; ws.signalsToReceiver = 0; ws.signalsToSender = 0;
     tally().peakSockets = Math.max(usage.peakSockets, wss.clients.size);
-    ws.on('pong', () => { ws.alive = true; });
+    ws.on('pong', data => { ws.alive = true; spendFrame(ws, data.length); });
+    ws.on('ping', data => { spendFrame(ws, data.length); if (ws.bufferedAmount < 64 * 1024) ws.pong(data); });
     const setupTimer = setTimeout(() => { if (!ws.room) ws.close(1008, 'Join a handoff first'); }, 10_000);
     ws.on('error', () => {}); // Errors are followed by close; close performs room cleanup.
     ws.on('message', (data, binary) => {
       ws.alive = true; // A slow upload can hold the pong behind megabytes of file data.
-      // Messages already read when the socket pauses still arrive, and are charged too.
-      const wait = work(ws.keys, data.length + workCosts.message);
-      if (wait) throttle(ws, wait);
+      spendFrame(ws, data.length); // Messages already read when the socket pauses still arrive, and are charged too.
       if (binary) {
         const peer = peerOf(ws);
         // After a receiver leaves, the sender's queued data for it can still be arriving.

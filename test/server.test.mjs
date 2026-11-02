@@ -694,47 +694,112 @@ test("a client flooding tiny messages waits for its address's work budget while 
   assert.equal(app.summary().throttled, 1);
 });
 
-test('page requests and new connections spend the same budget, and get 429 until it refills', { timeout: 10000 }, async t => {
-  const rate = 128 * 1024; // Two pages a second, with four ahead.
-  const { app } = await setup(t, { maxWork: { address: rate, network: 4 * rate } });
-  const base = `http://127.0.0.1:${app.server.address().port}`;
-  const page = address => fetch(base + '/', { headers: { 'X-Real-IP': address } }).then(response => response.status);
-  const statuses = [];
-  for (let i = 0; i < 6; i++) statuses.push(await page('203.0.113.20'));
-  assert.deepEqual(statuses, [200, 200, 200, 200, 200, 429]);
-  assert.equal(await rawUpgrade(t, app, '203.0.113.20'), 429, 'A connection is refused while its address is in debt');
-  assert.equal(await page('198.51.100.20'), 200, 'Other customers are served');
-  await delay(700);
-  assert.equal(await page('203.0.113.20'), 200, 'Back in credit after half a second');
-  assert.equal(app.summary().refused, 2);
+test('pings, pongs and fragmented messages are charged like any other frame', { timeout: 20000 }, async t => {
+  const rate = 2 * 1024 * 1024;
+  const { app, connect } = await setup(t, { maxWork: { address: rate, network: 4 * rate } });
+  // Each costs 4 KiB plus its size, so three thousand is far beyond two seconds of credit.
+  for (const flood of [ws => ws.ping(), ws => ws.pong()]) {
+    const client = await connect('203.0.113.50');
+    const server = [...app.wss.clients].find(socket => !socket.room);
+    for (let i = 0; i < 3_000; i++) flood(client);
+    await until(() => server.isPaused, 'the flood to be throttled');
+    client.terminate();
+  }
+  // A client that stops reading is not answered, so unread pongs cannot grow the relay's memory.
+  const quiet = await connect('203.0.113.51');
+  const server = [...app.wss.clients].find(socket => !socket.room);
+  quiet.pause(); quiet._socket.pause();
+  for (let i = 0; i < 2_000; i++) quiet.ping(Buffer.alloc(125));
+  await until(() => server.isPaused, 'the ping flood to be throttled');
+  await delay(100);
+  assert.ok(server.bufferedAmount <= 128 * 1024, `The relay buffered ${server.bufferedAmount} bytes of answers`);
 });
 
-test('a sender held by the relay and over its work budget resumes when both clear, and every byte arrives', { timeout: 20000 }, async t => {
-  const { app, connect } = await setup(t, { maxWork: { address: 8 * 1024 * 1024, network: 32 * 1024 * 1024 } });
+// A client must mask its frames; `ws` offers no fragment API, so these are written by hand.
+const rawFrames = async (t, app, address) => {
+  const socket = connectTCP(app.server.address().port, '127.0.0.1'); await once(socket, 'connect');
+  socket.write(`GET /socket HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: ${randomBytes(16).toString('base64')}\r\nSec-WebSocket-Version: 13\r\nX-Real-IP: ${address}\r\n\r\n`);
+  const [handshake] = await once(socket, 'data');
+  assert.match(handshake.toString(), /^HTTP\/1\.1 101 /);
+  t.after(() => socket.destroy());
+  const closed = once(socket, 'data').then(([frame]) => frame[0] === 0x88 ? frame.readUInt16BE(2) : null);
+  return { socket, frame: (first, final, payload = Buffer.alloc(0)) => {
+    const mask = randomBytes(4), masked = Buffer.from(payload.map((byte, i) => byte ^ mask[i % 4]));
+    socket.write(Buffer.concat([Buffer.from([(final ? 0x80 : 0) | first, 0x80 | masked.length]), mask, masked]));
+  }, closed };
+};
+
+test('a message split into more than sixteen fragments is refused instead of relayed for one charge', { timeout: 10000 }, async t => {
+  const { app } = await setup(t);
+  const { frame, closed } = await rawFrames(t, app, '203.0.113.52');
+  frame(0x1, false, Buffer.from('{')); // A text message that never ends.
+  for (let i = 0; i < 20; i++) frame(0x0, false);
+  assert.equal(await closed, 1008, 'The relay closes the connection rather than buffering the fragments');
+});
+
+test("one address's flood holds its network's other customers for no more than its debt limit", { timeout: 30000 }, async t => {
+  const rate = 1024 * 1024;
+  const { app, connect } = await setup(t, { maxWork: { address: rate, network: 4 * rate } });
+  const { owner } = await create(connect, '203.0.113.60');
+  const flooding = [...app.wss.clients][0];
+  for (let i = 0; i < 8_000; i++) owner.send(Buffer.alloc(1)); // 32 MiB of work: 32 s for the address.
+  await until(() => flooding.isPaused, 'the flood to be throttled');
+  // Debt stops at two seconds' worth, so the neighbour waits about that, not the whole flood.
+  const neighbour = await connect('203.0.113.61');
+  const started = performance.now();
+  const created = message(neighbour); neighbour.send(JSON.stringify({ type: 'create' }));
+  assert.equal((await created).type, 'created');
+  const waited = performance.now() - started;
+  assert.ok(waited < 4_000, `The neighbour waited ${Math.round(waited)} ms`);
+  assert.equal(flooding.isPaused, true, 'The flood is still waiting for its own budget');
+});
+
+test('a throttled connection the relay closes gives up its slot at once, not after the close timeout', { timeout: 20000 }, async t => {
+  const rate = 512 * 1024;
+  const { app, connect } = await setup(t, { maxWork: { address: rate, network: 4 * rate } });
+  const { owner, room } = await create(connect, '203.0.113.70');
+  const receiver = await joinRelay(connect, owner, room, '198.51.100.70');
+  const relayedReceiver = [...app.wss.clients].find(ws => ws.owner === false);
+  for (let i = 0; i < 1_000; i++) receiver.ping(Buffer.alloc(125));
+  await until(() => relayedReceiver.isPaused, 'the receiver to be throttled');
+  const started = performance.now();
+  owner.close(); // The relay closes the throttled receiver too, and must read its reply.
+  await until(() => app.wss.clients.size === 0, 'both connections to close');
+  const took = performance.now() - started;
+  assert.ok(took < 5_000, `The closed connections held their slots for ${Math.round(took)} ms`);
+});
+
+test('a sender both held by the relay and over its budget resumes only when both clear, with every byte intact', { timeout: 20000 }, async t => {
+  // The relay holds the sender after about 1.3 MiB, which already costs more than two seconds of this budget.
+  const rate = 512 * 1024, messages = 40;
+  const { app, connect } = await setup(t, { maxWork: { address: rate, network: 4 * rate } });
   const { owner, room } = await create(connect, '203.0.113.40');
   const receiver = await joinRelay(connect, owner, room, '198.51.100.40');
   const relayedSender = [...app.wss.clients].find(ws => ws.owner);
   const chunks = []; receiver.on('message', (data, binary) => { if (binary) chunks.push(data); });
-  receiver.pause(); flood(owner); // 30 MiB: beyond the relay's buffer and two seconds of this budget.
-  await until(() => relayedSender.isPaused, 'the relay to hold the sender');
+  receiver.pause();
+  for (let i = 0; i < messages; i++) owner.send(Buffer.alloc(60 * 1024, i % 251));
+  await until(() => relayedSender.isPaused && relayedSender.throttled, 'the sender to be held by the relay and throttled');
+  await until(() => !relayedSender.throttled, 'the budget to refill');
+  assert.equal(relayedSender.isPaused, true, 'The relay still holds the sender for its slow receiver');
   receiver.resume();
-  await until(() => chunks.length === 512, 'every relayed message');
+  await until(() => chunks.length === messages, 'every relayed message');
   assert.ok(app.summary().throttled >= 1, 'The budget slowed the sender too');
   chunks.forEach((chunk, i) => assert.ok(chunk.equals(Buffer.alloc(60 * 1024, i % 251)), `Message ${i} arrived intact and in order`));
 });
 
 test('each UTC day ends with one summary line of totals and no addresses', { timeout: 10000 }, async t => {
-  t.mock.timers.enable({ apis: ['Date'], now: Date.UTC(2026, 10, 1, 23, 59) });
+  t.mock.timers.enable({ apis: ['Date', 'setInterval'], now: Date.UTC(2026, 10, 1, 23, 59) });
   const lines = [];
   const { app, connect } = await setup(t, { log: line => lines.push(JSON.parse(line)) });
   assert.equal(await startRelay(await limitedPair(connect, '203.0.113.30')), 'admitted');
-  t.mock.timers.tick(2 * 60 * 1000);
-  const today = app.summary(); // The heartbeat checks the day the same way.
+  for (let tick = 0; tick < 5; tick++) t.mock.timers.tick(25_000); // The heartbeat crosses midnight UTC.
   assert.equal(lines.length, 1);
   const [{ event, day, relayedBytes, signalBytes, rooms, peakSockets, throttled, refused, closedByLimit }] = lines;
   assert.deepEqual({ event, day, relayedBytes, rooms, peakSockets, throttled, refused, closedByLimit }, { event: 'daily-usage', day: '2026-11-01', relayedBytes: 64 * 1024 * 1024, rooms: 1, peakSockets: 2, throttled: 0, refused: 0, closedByLimit: {} });
   assert.ok(signalBytes > messageOverhead);
   assert.ok(!JSON.stringify(lines).includes('203.0.113'), 'No addresses are logged');
+  const today = app.summary();
   assert.equal(today.day, '2026-11-02'); assert.equal(today.rooms, 0);
 });
 
