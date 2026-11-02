@@ -8,7 +8,8 @@ import { mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createServer } from 'node:http';
+import { createServer, request as httpRequest } from 'node:http';
+import { connect as connectTCP } from 'node:net';
 import { WebSocketServer } from 'ws';
 import { createApp } from '../server.mjs';
 import { makeSecret, importSecret, encrypt, encodeJSON, toBase64 } from '../public/protocol.js';
@@ -375,4 +376,46 @@ test('an open note edit is held back on join, then its revised contents are deli
   await receiver.until(s => s.status === 'All files received');
   await receiver.run('click', { element: 'copy-agent' });
   assert.equal((await receiver.run('snapshot')).clipboard, '# HANDOFF.md\n\nFinished draft\n');
+});
+
+// In production, Nginx puts each client's address in X-Real-IP; this proxy stands in for it.
+async function addressedProxy(t, upstream, address) {
+  const target = new URL(upstream);
+  const proxy = createServer((req, res) => {
+    const forward = httpRequest({ host: target.hostname, port: target.port, path: req.url, method: req.method, headers: { ...req.headers, 'x-real-ip': address } }, response => { res.writeHead(response.statusCode, response.headers); response.pipe(res); });
+    req.pipe(forward);
+  });
+  proxy.on('upgrade', (req, socket, head) => {
+    const upstreamSocket = connectTCP(target.port, target.hostname, () => {
+      const headers = Object.entries({ ...req.headers, 'x-real-ip': address }).map(([name, value]) => `${name}: ${value}`).join('\r\n');
+      upstreamSocket.write(`${req.method} ${req.url} HTTP/1.1\r\n${headers}\r\n\r\n`); upstreamSocket.write(head);
+      socket.pipe(upstreamSocket).pipe(socket);
+    });
+    upstreamSocket.on('error', () => socket.destroy()); socket.on('error', () => upstreamSocket.destroy());
+  });
+  await new Promise(resolve => proxy.listen(0, '127.0.0.1', resolve));
+  t.after(() => { proxy.closeAllConnections(); proxy.close(); });
+  return `http://127.0.0.1:${proxy.address().port}/`;
+}
+
+test('a relayed handoff the work budget slows still arrives intact at the Node receiver', { timeout: 40000 }, async t => {
+  const rate = 2 * 1024 * 1024, size = 12 * 1024 * 1024;
+  const app = createApp({ maxWork: { address: rate, network: 4 * rate }, log: () => {} });
+  await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve));
+  t.after(() => app.close());
+  const base = await addressedProxy(t, `http://127.0.0.1:${app.server.address().port}/`, '203.0.113.60');
+  const sender = await page(t, base);
+  await sender.run('add', { files: [{ name: 'budget.bin', size }] });
+  const ready = await sender.until(s => s.rows.length === 1 && s.link.startsWith('http'));
+  const destination = await mkdtemp(join(tmpdir(), 'meatproxy-budget-'));
+  t.after(() => rm(destination, { recursive: true, force: true }));
+  const started = performance.now();
+  const child = spawn(process.execPath, [fileURLToPath(new URL('../public/receive.mjs', import.meta.url)), ready.link, destination], { stdio: ['ignore', 'pipe', 'pipe'] });
+  t.after(() => child.kill());
+  let output = ''; child.stdout.on('data', chunk => { output += chunk; }); child.stderr.on('data', chunk => { output += chunk; });
+  assert.equal(await new Promise(resolve => child.on('exit', resolve)), 0, output);
+  assert.equal(createHash('sha256').update(await readFile(join(destination, 'budget.bin'))).digest('hex'), createHash('sha256').update(new Uint8Array(size).fill(71)).digest('hex'));
+  // 12 MiB of chunks costs over 15 MiB of work; less the 4 MiB of credit, at 2 MiB/s that takes over 5.5 s.
+  assert.ok(performance.now() - started >= 5_000, 'The budget slowed the transfer');
+  assert.ok(app.summary().throttled >= 1);
 });
