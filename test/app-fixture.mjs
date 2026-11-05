@@ -5,7 +5,7 @@ import { readFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { parseHTML } from 'linkedom';
 
-const { document, HTMLElement, HTMLAnchorElement } = parseHTML(await readFile(new URL('../public/index.html', import.meta.url), 'utf8'));
+const { document, HTMLElement, HTMLAnchorElement, Event: DOMEvent } = parseHTML(await readFile(new URL('../public/index.html', import.meta.url), 'utf8'));
 const location = new URL(workerData.url), downloads = [];
 let clipboard = '', finishing = false, resume;
 // Tests move this page's clock forward to reach long timeouts without waiting for them.
@@ -74,6 +74,24 @@ parentPort.on('message', async ({ id, command, ...args }) => {
     else if (command === 'add') {
       const files = args.files.map(({ name, size, byte = 71 }) => new File([new Uint8Array(size).fill(byte)], name));
       $('file-input').onchange({ target: { files, value: '' } });
+    } else if (command === 'paste') {
+      // Supply native textarea editing APIs absent from this DOM fixture, then
+      // dispatch through the application's real paste listener.
+      const note = $('note'); note.value = args.initial || '';
+      note.selectionStart = args.start ?? note.value.length; note.selectionEnd = args.end ?? note.selectionStart;
+      note.maxLength = Number(note.getAttribute('maxlength'));
+      note.setRangeText = (text, start, end) => {
+        note.value = note.value.slice(0, start) + text + note.value.slice(end);
+        note.selectionStart = note.selectionEnd = start + text.length;
+      };
+      document.execCommand = (_command, _showUI, text) => {
+        note.setRangeText(text, note.selectionStart, note.selectionEnd); return true;
+      };
+      $('fix-formatting').checked = args.enabled ?? true;
+      const event = new DOMEvent('paste', { bubbles: true, cancelable: true });
+      event.clipboardData = { getData: () => args.text };
+      note.dispatchEvent(event);
+      if (!event.defaultPrevented) note.setRangeText(args.text, note.selectionStart, note.selectionEnd);
     } else if (command === 'note') { $('note').value = args.text; await $('add-note').onclick(); }
     else if (command === 'click') {
       const element = args.element ? $(args.element) : [...document.querySelectorAll('button,a')].find(button => button.getAttribute('aria-label') === args.label);

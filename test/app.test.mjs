@@ -13,6 +13,7 @@ import { connect as connectTCP } from 'node:net';
 import { WebSocketServer } from 'ws';
 import { createApp } from '../server.mjs';
 import { makeSecret, importSecret, encrypt, encodeJSON, toBase64 } from '../public/protocol.js';
+import { terminalTable, collapsedTerminalNote, restoredTerminalNote } from './note-formatting-fixture.mjs';
 
 async function page(t, url, options = {}) {
   const worker = new Worker(new URL('./app-fixture.mjs', import.meta.url), { workerData: { url, ...options } });
@@ -118,6 +119,27 @@ test('adding and editing a note retains indentation and trailing whitespace thro
   await receiver.run('click', { element: 'download-all' });
   const [download] = await receiver.run('downloads');
   assert.equal(download.sha256, createHash('sha256').update(edited + '\n').digest('hex'));
+});
+
+test('actual paste restores a boxed table in the editor and delivers its row breaks intact', { timeout: 15000 }, async t => {
+  const sender = await page(t, await server(t));
+  await sender.run('paste', { text: collapsedTerminalNote, enabled: false });
+  assert.equal((await sender.run('snapshot')).note, collapsedTerminalNote, 'Unchecked formatting uses the original paste');
+  await sender.run('paste', { text: terminalTable.replaceAll('\n', ' '), initial: 'Before\nreplace\nAfter', start: 7, end: 14 });
+  assert.equal((await sender.run('snapshot')).note, 'Before\n' + terminalTable + '\nAfter', 'Cleanup replaces only the selected text');
+  await sender.run('paste', { text: collapsedTerminalNote });
+  assert.equal((await sender.run('snapshot')).note, restoredTerminalNote);
+  await sender.run('click', { element: 'add-note' });
+  const ready = await sender.until(s => s.rows.length === 1 && s.link.startsWith('http'));
+  const receiver = await page(t, ready.link);
+  await receiver.until(s => s.status === 'Sender online');
+  await receiver.run('click', { element: 'accept-files' });
+  await receiver.until(s => s.status === 'All files received');
+  await receiver.run('click', { element: 'copy-agent' });
+  assert.equal((await receiver.run('snapshot')).clipboard, '# HANDOFF.md\n\n' + restoredTerminalNote + '\n');
+  await receiver.run('click', { element: 'download-all' });
+  const [download] = await receiver.run('downloads');
+  assert.equal(download.sha256, createHash('sha256').update(restoredTerminalNote + '\n').digest('hex'));
 });
 
 test('actual composer removes files, edits/cancels notes and updates capacity', { timeout: 15000 }, async t => {

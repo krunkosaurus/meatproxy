@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { fixNoteFormatting } from '../public/note-formatting.js';
+import { terminalTable, collapsedTerminalNote, restoredTerminalNote } from './note-formatting-fixture.mjs';
 
 const pasted = ` The best clue is the timing: Washington drops happen only from about 6 AM to 7 PM Pacific, and almost never
   from 8 PM to 5 AM. Starlink congestion usually peaks in the evening, so this follows daytime activity
@@ -52,6 +53,34 @@ test('keeps indented code, headings, tables, quotes and Markdown hard breaks', (
   assert.equal(fixNoteFormatting(markdown), markdown);
   assert.equal(fixNoteFormatting('\tcode\n\tmore code'), '\tcode\n\tmore code');
   assert.equal(fixNoteFormatting('- List item\n# Heading\n    code\n    more code'), '- List item\n# Heading\n    code\n    more code');
+});
+
+test('restores the reported collapsed table shape without changing its text or amounts', () => {
+  assert.equal(fixNoteFormatting(collapsedTerminalNote), restoredTerminalNote);
+  assert.equal(fixNoteFormatting(terminalTable.replaceAll('\n', ' ')), terminalTable);
+  assert.equal(fixNoteFormatting(restoredTerminalNote), restoredTerminalNote);
+});
+
+test('keeps box-table rows apart from prose and restores adjacent rows without separator borders', () => {
+  const table = '┌────┬─────┐\n│ A  │ B   │\n├────┼─────┤\n│ 1  │ 2   │\n│ 3  │ 4   │\n└────┴─────┘';
+  assert.equal(fixNoteFormatting(table.replaceAll('\n', ' ')), table);
+  assert.equal(fixNoteFormatting('Read these values:\n' + table + '\nAfter the table\ncontinued.'), 'Read these values:\n' + table + '\nAfter the table continued.');
+  assert.equal(fixNoteFormatting('  ' + table.replaceAll('\n', '\n  ')), table);
+  for (const margin of [' ', '  ', '   ']) {
+    const cleaned = fixNoteFormatting(margin + table.replaceAll('\n', ' '));
+    assert.equal(cleaned, table);
+    assert.equal(fixNoteFormatting(cleaned), cleaned);
+  }
+  assert.equal(fixNoteFormatting('- Item\n┌──┐ │ cell │ └──┘\n    const a = 1;\n    const b = 2;'), '- Item\n┌──┐\n│ cell │\n└──┘\n    const a = 1;\n    const b = 2;');
+});
+
+test('leaves fenced, indented, inline and incomplete box-table examples alone', () => {
+  const collapsed = terminalTable.replaceAll('\n', ' ');
+  const fenced = '```text\n' + collapsed + '\n```';
+  assert.equal(fixNoteFormatting(fenced), fenced);
+  for (const indent of ['    ', '\t', ' \t', '  \t', '   \t']) assert.equal(fixNoteFormatting(indent + collapsed), indent + collapsed);
+  assert.equal(fixNoteFormatting('Example: ' + collapsed), 'Example: ' + collapsed);
+  for (const text of ['┌──┐ │ cell │', '┌──┐ prose └──┘', '┌──┐ ├──┤ └──┘']) assert.equal(fixNoteFormatting(text), text);
 });
 
 test('handles Windows newlines without changing inline text, Unicode or paragraph spacing', () => {
