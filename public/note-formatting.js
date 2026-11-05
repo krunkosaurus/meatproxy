@@ -1,4 +1,5 @@
 const listMarker = /^[ \t]*(?:[-+*•]|\d+[.)])[ \t]+/;
+const terminalBullet = /^ {0,3}•[ \t]+/;
 const blockLine = /^(?:#{1,6}(?:\s|$)|>|\||.*\|\s*$|(?:[-*_]\s*){3,}$|[=-]+\s*$)/;
 const boxLine = /^(?:[┌├└][─┬┼┴]+[┐┤┘]|│.*│)$/;
 const indentation = line => line.match(/^ */)[0].length;
@@ -36,7 +37,7 @@ export function fixNoteFormatting(text) {
   if (!/[\r\n]/.test(text)) {
     if (/^(?: {4}| *\t)/.test(text)) return text;
     const table = restoreBoxTable(text);
-    if (!table) return text;
+    if (!table) return terminalBullet.test(text) ? text.trimStart() : text;
     text = table.join('\n');
   }
   let lines = text.replace(/\r\n?/g, '\n').split('\n');
@@ -66,7 +67,9 @@ export function fixNoteFormatting(text) {
       listMargin = null; listIndent = 0;
     }
     if (!fence && marker) {
-      listMargin = listMargin === null ? (indent < 4 ? indent : 0) : Math.min(listMargin, indent);
+      // Terminal • items can each have a copy margin after an unindented lead.
+      if (terminalBullet.test(line)) listMargin = indent;
+      else listMargin = listMargin === null ? (indent < 4 ? indent : 0) : Math.min(listMargin, indent);
     }
     const formatted = listMargin === null ? line : line.slice(Math.min(listMargin, indent));
     if (fence) {

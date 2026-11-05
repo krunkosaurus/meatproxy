@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { fixNoteFormatting } from '../public/note-formatting.js';
-import { terminalTable, collapsedTerminalNote, restoredTerminalNote } from './note-formatting-fixture.mjs';
+import { terminalTable, collapsedTerminalNote, restoredTerminalNote, pastedTerminalBullets, alignedTerminalBullets } from './note-formatting-fixture.mjs';
 
 const pasted = ` The best clue is the timing: Washington drops happen only from about 6 AM to 7 PM Pacific, and almost never
   from 8 PM to 5 AM. Starlink congestion usually peaks in the evening, so this follows daytime activity
@@ -38,6 +38,21 @@ test('preserves nested lists while unwrapping their continuation lines', () => {
   assert.equal(fixNoteFormatting(hardBreak), hardBreak);
   assert.equal(fixNoteFormatting('Intro\n  - Parent\n    continued\n    - Child\n      continued\n  - Next'), 'Intro\n- Parent continued\n  - Child continued\n- Next');
   assert.equal(fixNoteFormatting('Intro\n  - Parent\n\n    - Child\n\n  - Next\n\nOther intro\n - Item'), 'Intro\n- Parent\n\n  - Child\n\n- Next\n\nOther intro\n- Item');
+});
+
+test('left-aligns terminal bullet items after an unindented summary bullet', () => {
+  assert.equal(fixNoteFormatting(pastedTerminalBullets), alignedTerminalBullets);
+  assert.equal(fixNoteFormatting(alignedTerminalBullets), alignedTerminalBullets);
+  assert.equal(fixNoteFormatting('  • Just one pasted item  '), '• Just one pasted item  ');
+  assert.equal(fixNoteFormatting('• Summary\n\n  • First line\n    continued\n\n  • Next item'), '• Summary\n\n• First line continued\n\n• Next item');
+  assert.equal(fixNoteFormatting('• Summary\n  • Item\n    - Markdown child\n      continuation'), '• Summary\n• Item\n  - Markdown child continuation');
+});
+
+test('terminal bullet alignment keeps fenced and indented code examples intact', () => {
+  const code = '    • First literal\n    • Second literal';
+  assert.equal(fixNoteFormatting(code), code);
+  const fenced = '```text\n' + pastedTerminalBullets + '\n```';
+  assert.equal(fixNoteFormatting(fenced), fenced);
 });
 
 test('keeps fenced code contents, including blank lines and shorter nested fences', () => {
