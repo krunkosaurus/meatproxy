@@ -36,6 +36,7 @@ function directoryFixture(existing = []) {
   const names = new Set(existing.map(name => name.normalize('NFC').toLowerCase()));
   const directory = {
     getFileHandle: async (name, { create = false } = {}) => {
+      if (Buffer.byteLength(name) > 255) throw new Error('ENAMETOOLONG');
       const normalized = name.normalize('NFC').toLowerCase();
       if (!create && !names.has(normalized)) throw new DOMException('Not found', 'NotFoundError');
       if (create) { events.push(['create', name]); names.add(normalized); }
@@ -74,6 +75,24 @@ test('filesystem name aliases cannot overwrite an earlier verified file', async 
   const file = await IncomingFile.create(meta(bytes), directory, 'cafe\u0301.txt');
   await file.append(bytes); await file.finish();
   assert.deepEqual(events[0], ['create', '2-cafe\u0301.txt']);
+});
+
+test('folder receive numbers maximum-length ASCII and Unicode filenames without exceeding the disk limit', async () => {
+  const bytes = new TextEncoder().encode('new contents');
+  for (const name of ['x'.repeat(251) + '.txt', '界'.repeat(83) + 'ab.txt', '🙂'.repeat(62) + 'abc.txt']) {
+    assert.equal(Buffer.byteLength(name), 255);
+    const { directory, events } = directoryFixture([name]);
+    for (let count = 0; count < 10; count++) {
+      const file = await IncomingFile.create(meta(bytes), directory, name);
+      await file.append(bytes); await file.finish();
+    }
+    const created = events.filter(([event]) => event === 'create').map(([, name]) => name);
+    assert.equal(new Set(created).size, 10);
+    assert.ok(created.every(value => Buffer.byteLength(value) <= 255 && value.endsWith('.txt')));
+    assert.ok(created.every(value => !value.includes('\ufffd')));
+    assert.ok(created.at(-1).startsWith('11-'), 'Numbering still fits after the prefix gains a digit');
+    assert.ok(!created.includes(name), 'The pre-existing file is left untouched');
+  }
 });
 
 test('truncated or corrupt folder receive aborts and removes only its own unfinished file', async () => {

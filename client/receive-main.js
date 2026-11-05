@@ -18,6 +18,7 @@ const socketURL = new URL('/socket', shareURL); socketURL.protocol = shareURL.pr
 const clientSocket = new WebSocket(socketURL); clientSocket.binaryType = 'arraybuffer';
 let inputSequence = 0, outputSequence = 0, queue = Promise.resolve(), manifest = [], currentFile, successful = false, stopped = false;
 const completed = new Map();
+const controlReader = new ControlReader();
 let idleTimer;
 function resetIdle() { clearTimeout(idleTimer); idleTimer = setTimeout(() => stop(new Error('No transfer activity for 60 seconds. Keep the sender tab open and retry.')), 60_000); }
 async function stop(error) {
@@ -54,6 +55,7 @@ clientSocket.onmessage = event => {
     }
     const plain = await decrypt(transferKey, event.data, `data:${roomID}:${sessionID}:sender`);
     if (plain.length < 5 || new DataView(plain.buffer, plain.byteOffset).getUint32(0) !== inputSequence++) throw new Error('Invalid transfer order.');
+    const control = controlReader.read(plain[4], plain.subarray(5));
     if (plain[4] === 1) {
       if (!currentFile || currentFile.offset + plain.length - 5 > currentFile.meta.size) throw new Error('Unexpected file data.');
       const bytes = plain.slice(5); let written = 0;
@@ -62,21 +64,18 @@ clientSocket.onmessage = event => {
       if (currentFile.offset % (CHUNK_BYTES * 16) === 0) await sendClientControl({ type: 'ack', id: currentFile.meta.id, offset: currentFile.offset });
       return;
     }
+    if (plain[4] === 2) return;
     if (plain[4] !== 0) throw new Error('Unexpected packet type.');
-    const control = decodeJSON(plain.slice(5));
     if (control.type === 'manifest') {
       manifest = validateManifest(control.files, manifest);
       console.log(`Receiving ${manifest.length} file(s) through an encrypted relay.`);
     } else if (control.type === 'start') {
       const meta = manifest.find(file => file.id === control.id);
       if (!meta || currentFile || completed.has(meta.id)) throw new Error('Unexpected file start.');
-      const safe = meta.name.replace(/[\\/\x00-\x1f\x7f]/g, '_').replace(/^\.+/, '_') || 'file';
-      let filename = safe; let n = 2;
-      while ([...completed.values()].some(file => file.name === filename)) filename = `${n++}-${safe}`;
       const partial = join(outputDir, `.meatproxy-${meta.id}.partial`);
       // An interrupted earlier run of this handoff can leave this file's partial behind.
       const handle = await open(partial, 'wx', 0o600).catch(async error => { if (error.code !== 'EEXIST') throw error; await unlink(partial); return open(partial, 'wx', 0o600); });
-      currentFile = { meta, safe, name: filename, partial, handle, hash: createHash('sha256'), offset: 0 };
+      currentFile = { meta, name: safeName(meta.name), partial, handle, hash: createHash('sha256'), offset: 0 };
     } else if (control.type === 'end') {
       const file = currentFile;
       if (!file || file.meta.id !== control.id || file.offset !== file.meta.size || file.hash.digest('hex') !== file.meta.sha256) throw new Error('File integrity verification failed.');
@@ -85,7 +84,7 @@ clientSocket.onmessage = event => {
       // including those from an earlier run into the same folder.
       for (let n = 2; ; n++) {
         try { await linkFile(file.partial, join(outputDir, file.name)); break; }
-        catch (error) { if (error.code !== 'EEXIST') throw error; file.name = `${n}-${file.safe}`; }
+        catch (error) { if (error.code !== 'EEXIST') throw error; file.name = safeName(file.meta.name, n); }
       }
       await unlink(file.partial);
       completed.set(file.meta.id, { name: file.name, bytes: file.offset, sha256: file.meta.sha256 }); currentFile = null;

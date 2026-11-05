@@ -375,17 +375,39 @@ var sha256 = /* @__PURE__ */ createHasher(
   /* @__PURE__ */ oidNist(1)
 );
 
-// client/file-tools.js
-var READ_BYTES = 1024 * 1024;
-var hex = (bytes) => Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
-var safeName = (name) => name.replace(/[\\/\x00-\x1f\x7f]/g, "_").replace(/^\.+/, "_") || "file";
+// public/filenames.js
+var filenameEncoder = new TextEncoder();
+function fitFilename(text, limit) {
+  let result = "", bytes = 0;
+  for (const character of text) {
+    bytes += filenameEncoder.encode(character).length;
+    if (bytes > limit) break;
+    result += character;
+  }
+  return result;
+}
+function safeName(name, number = 1) {
+  const clean2 = name.replace(/[\\/\x00-\x1f\x7f]/g, "_").replace(/^\.+/, "_") || "file";
+  const prefix = number === 1 ? "" : `${number}-`;
+  const limit = 255 - prefix.length;
+  if (filenameEncoder.encode(clean2).length <= limit) return prefix + clean2;
+  const dot = clean2.lastIndexOf(".");
+  const extension = dot > 0 ? clean2.slice(dot) : "";
+  const stem = extension ? clean2.slice(0, dot) : clean2;
+  const stemLimit = limit - filenameEncoder.encode(extension).length;
+  if (extension && filenameEncoder.encode([...stem][0]).length <= stemLimit) return prefix + fitFilename(stem, stemLimit) + extension;
+  return prefix + fitFilename(clean2, limit);
+}
 function uniqueName(name, used) {
-  const original = safeName(name);
-  let result = original, number = 2;
-  while (used.has(result.toLowerCase())) result = `${number++}-${original}`;
+  let result = safeName(name), number = 2;
+  while (used.has(result.toLowerCase())) result = safeName(name, number++);
   used.add(result.toLowerCase());
   return result;
 }
+
+// client/file-tools.js
+var READ_BYTES = 1024 * 1024;
+var hex = (bytes) => Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 async function hashFile(file, onProgress = () => {
 }) {
   const hash = sha256.create();
@@ -411,7 +433,7 @@ var IncomingFile = class _IncomingFile {
     const file = new _IncomingFile(meta);
     if (directory) {
       file.directory = directory;
-      file.name = name;
+      file.name = safeName(name);
       try {
         for (let number = 2; ; number++) {
           try {
@@ -420,7 +442,7 @@ var IncomingFile = class _IncomingFile {
             if (error.name === "NotFoundError") break;
             throw error;
           }
-          file.name = `${number}-${name}`;
+          file.name = safeName(name, number);
         }
         file.handle = await directory.getFileHandle(file.name, { create: true });
         file.writer = await file.handle.createWritable();

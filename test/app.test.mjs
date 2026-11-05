@@ -49,9 +49,79 @@ async function server(t, options) {
   return `http://127.0.0.1:${app.server.address().port}/`;
 }
 
+test('idle and invalid composer selections use no sockets; first prepared content creates one room', { timeout: 15000 }, async t => {
+  const app = createApp({ maxClients: 1, log: () => {} });
+  await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve));
+  t.after(() => app.close());
+  const base = `http://127.0.0.1:${app.server.address().port}/`;
+  const sender = await page(t, base, { hashDelay: 200 }), other = await page(t, base);
+  const idle = await sender.run('snapshot');
+  assert.equal(idle.socketCount, 0);
+  assert.equal(idle.copyDisabled, true);
+  assert.equal(idle.commandDisabled, true);
+  assert.equal(app.wss.clients.size, 0);
+  assert.equal(app.rooms.size, 0);
+  await sender.run('previewNames', { enabled: true });
+  await sender.run('note', { text: ' \n\t ' });
+  await sender.run('add', { files: [] });
+  await other.run('add', { files: Array.from({ length: 101 }, (_, i) => ({ name: `${i}.txt`, size: 0 })) });
+  await other.until(s => s.feedback.includes('limit is 100'));
+  assert.equal((await sender.run('snapshot')).socketCount, 0);
+  assert.equal((await other.run('snapshot')).socketCount, 0);
+  assert.equal(app.rooms.size, 0);
+
+  await sender.run('add', { files: [{ name: 'first.txt', size: 0 }] });
+  await sender.until(s => s.feedback.startsWith('Adding first.txt'));
+  assert.equal((await sender.run('snapshot')).socketCount, 0, 'Hashing finishes before a connection is reserved');
+  await sender.run('add', { files: [{ name: 'second.txt', size: 0 }] });
+  const ready = await sender.until(s => s.rows.length === 1 && s.link.startsWith('http'));
+  assert.equal(ready.socketCount, 1);
+  assert.equal(ready.copyDisabled, false);
+  assert.equal(ready.commandDisabled, false);
+  assert.equal(app.wss.clients.size, 1);
+  assert.equal(app.rooms.size, 1);
+  for (let attempt = 0; attempt < 100 && ![...app.rooms.values()][0].preview.names.length; attempt++) await delay(10);
+  assert.deepEqual([...app.rooms.values()][0].preview.names, ['first.txt'], 'Preview settings chosen before connection apply to the new room');
+
+  await sender.run('add', { files: [{ name: 'first.txt', size: 0 }] });
+  await sender.until(s => s.feedback.startsWith('Already added'));
+  await sender.run('note', { text: 'Another item' });
+  const added = await sender.until(s => s.rows.length === 2);
+  assert.equal(added.socketCount, 1);
+  assert.equal(added.link, ready.link);
+  assert.equal(app.rooms.size, 1);
+  assert.equal((await other.run('snapshot')).socketCount, 0, 'An unused homepage does not compete for the one socket slot');
+});
+
+test('adding and editing a note retains indentation and trailing whitespace through verified delivery', { timeout: 15000 }, async t => {
+  const sender = await page(t, await server(t));
+  const original = '    const first = 1;\n    const second = 2;  \n\n';
+  await sender.run('note', { text: original });
+  const ready = await sender.until(s => s.rows.length === 1 && s.link.startsWith('http'));
+  await sender.run('click', { label: 'Edit HANDOFF.md' });
+  assert.equal((await sender.run('snapshot')).note, original);
+  await sender.run('click', { element: 'cancel-note' });
+  await sender.run('click', { label: 'Edit HANDOFF.md' });
+  assert.equal((await sender.run('snapshot')).note, original);
+  const edited = '\n  - parent\n    continuation  \n\n';
+  await sender.run('note', { text: edited });
+  await sender.run('click', { label: 'Edit HANDOFF.md' });
+  assert.equal((await sender.run('snapshot')).note, edited);
+  await sender.run('click', { element: 'cancel-note' });
+
+  const receiver = await page(t, ready.link);
+  await receiver.until(s => s.status === 'Sender online');
+  await receiver.run('click', { element: 'accept-files' });
+  await receiver.until(s => s.status === 'All files received');
+  await receiver.run('click', { element: 'copy-agent' });
+  assert.equal((await receiver.run('snapshot')).clipboard, `# HANDOFF.md\n\n${edited}\n`);
+  await receiver.run('click', { element: 'download-all' });
+  const [download] = await receiver.run('downloads');
+  assert.equal(download.sha256, createHash('sha256').update(edited + '\n').digest('hex'));
+});
+
 test('actual composer removes files, edits/cancels notes and updates capacity', { timeout: 15000 }, async t => {
   const sender = await page(t, await server(t));
-  await sender.until(s => s.link.startsWith('http'));
   await sender.run('note', { text: 'Original note' });
   await sender.until(s => s.rows.length === 1);
   await sender.run('click', { label: 'Edit HANDOFF.md' });

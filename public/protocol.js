@@ -23,6 +23,35 @@ export async function decrypt(key, packet, context) {
 }
 export const encodeJSON = value => encoder.encode(JSON.stringify(value));
 export const decodeJSON = value => JSON.parse(decoder.decode(value));
+// A manifest may contain 100 names of 512 UTF-16 units. JSON escapes cost at most
+// six bytes per unit; the remaining fields need less than 256 bytes per entry.
+const MAX_CONTROL_BYTES = MAX_FILES * (512 * 6 + 256) + 64;
+export function encodeControl(value) {
+  const bytes = encodeJSON(value), parts = [];
+  // Existing receivers understand a single type-0 packet. Keep that format whenever
+  // JSON plus the 5-byte header, 12-byte IV and 16-byte GCM tag fits the relay.
+  if (bytes.length + 33 <= 64 * 1024) return [{ type: 0, bytes }];
+  for (let offset = 0; offset < bytes.length; offset += CHUNK_BYTES) {
+    const end = Math.min(offset + CHUNK_BYTES, bytes.length);
+    parts.push({ type: end === bytes.length ? 0 : 2, bytes: bytes.subarray(offset, end) });
+  }
+  return parts;
+}
+export class ControlReader {
+  constructor() { this.buffer = new Uint8Array(MAX_CONTROL_BYTES); this.length = 0; this.pending = false; }
+  read(type, bytes) {
+    if (type !== 0 && type !== 2) {
+      if (this.pending) throw new Error('File data interrupted a control message.');
+      return;
+    }
+    if (this.length + bytes.length > this.buffer.length) throw new Error('The transfer control message is too large.');
+    this.buffer.set(bytes, this.length); this.length += bytes.length;
+    if (type === 2) { this.pending = true; return; }
+    const value = decodeJSON(this.buffer.subarray(0, this.length));
+    this.length = 0; this.pending = false;
+    return value;
+  }
+}
 export async function digest(bytes) {
   return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)), b => b.toString(16).padStart(2, '0')).join('');
 }
