@@ -1,8 +1,9 @@
-import { MAX_BYTES, MAX_FILES, CHUNK_BYTES, makeSecret, importSecret, encrypt, decrypt, encodeJSON, decodeJSON, toBase64, fromBase64, validateManifest } from './protocol.js';
+import { MAX_BYTES, MAX_FILES, CHUNK_BYTES, makeSecret, importSecret, encrypt, decrypt, encodeJSON, decodeJSON, encodeControl, ControlReader, toBase64, fromBase64, validateManifest } from './protocol.js';
 import { streamFile, TransferMeter, waitForDataChannel, createWaiters } from './transfer.js';
 import { FileTasks } from './file-tasks.js';
 import { prepareAdditions } from './handoff.js';
 import { fixNoteFormatting } from './note-formatting.js';
+import { safeName, uniqueName } from './filenames.js';
 
 const $ = id => document.getElementById(id);
 const isSender = location.pathname === '/';
@@ -159,7 +160,7 @@ function abortIncoming(p) {
 function newPeer() {
   abortIncoming(peer);
   if (peer) { clearTimeout(peer.timer); peer.closed = true; peer.pc?.close(); peer.waiters.rejectAll(new Error('The recipient disconnected.')); }
-  peer = { session: '', pc: null, dc: null, transport: '', tx: Promise.resolve(), rx: Promise.resolve(), outSeq: 0, inSeq: 0, candidates: [], ready: false, sent: new Set(), announced: new Set(), waiters: createWaiters(), closed: false, failed: false, sending: false, total: 0, done: 0, heard: 0, awaitingData: false, stalled: false };
+  peer = { session: '', pc: null, dc: null, transport: '', tx: Promise.resolve(), rx: Promise.resolve(), outSeq: 0, inSeq: 0, controlReader: new ControlReader(), candidates: [], ready: false, sent: new Set(), announced: new Set(), waiters: createWaiters(), closed: false, failed: false, sending: false, total: 0, done: 0, heard: 0, awaitingData: false, stalled: false };
   return peer;
 }
 async function signal(value, p = peer) {
@@ -260,7 +261,8 @@ function sendPayload(p, type, bytes) {
   });
   p.tx = result.catch(() => {}); return result;
 }
-const sendControl = (p, value) => sendPayload(p, 0, encodeJSON(value));
+// Enqueue every part before yielding, so another control cannot interleave its parts.
+const sendControl = (p, value) => Promise.all(encodeControl(value).map(({ type, bytes }) => sendPayload(p, type, bytes)));
 function receivePacket(p, raw) {
   p.heard = performance.now();
   p.rx = p.rx.then(async () => {
@@ -268,14 +270,15 @@ function receivePacket(p, raw) {
     p.heard = performance.now(); // Data that arrived earlier is still progress while it is processed.
     const plain = await decrypt(key, raw, `data:${room}:${p.session}:${isSender ? 'receiver' : 'sender'}`);
     if (plain.length < 5 || new DataView(plain.buffer, plain.byteOffset).getUint32(0) !== p.inSeq++) throw new Error('Transfer order could not be verified. Reconnect to try again.');
-    if (plain[4] === 0) await onControl(p, decodeJSON(plain.slice(5)));
+    const control = p.controlReader.read(plain[4], plain.subarray(5));
+    if (plain[4] === 0) await onControl(p, control);
     else if (plain[4] === 1 && !isSender && p.incoming) {
       const data = plain.slice(5); const item = p.incoming;
       if (item.offset + data.length > item.meta.size) throw new Error('The incoming file exceeds its declared size.');
       item.parts.push(data); item.buffered += data.length; item.offset += data.length; p.done += data.length;
       if (item.buffered >= RECEIVE_BLOCK_BYTES) await flushIncoming(item);
       if (item.offset % RECEIVE_BLOCK_BYTES === 0) await sendControl(p, { type: 'ack', id: item.meta.id, offset: item.offset });
-    } else throw new Error('An unexpected transfer packet arrived.');
+    } else if (plain[4] !== 2) throw new Error('An unexpected transfer packet arrived.');
   }).catch(error => { if (p === peer && !p.closed && !p.failed) fail(error); });
 }
 async function flushIncoming(item) {
@@ -297,10 +300,7 @@ async function onControl(p, message) {
     const meta = files.find(file => file.id === message.id);
     if (!meta || p.incoming || received.has(meta.id)) throw new Error('Unexpected file start.');
     const token = `${p.session}:${meta.id}`;
-    const original = safeName(meta.name);
-    let name = original, n = 2;
-    while (folderNames.has(name.toLowerCase())) name = `${n++}-${original}`;
-    folderNames.add(name.toLowerCase());
+    const name = uniqueName(meta.name, folderNames);
     p.incoming = { meta, token, parts: [], buffered: 0, offset: 0 }; p.awaitingData = true;
     await fileTasks.run('begin', { token, meta, directory: receiveFolder, name });
     if (p !== peer || p.closed || p.failed) return;
@@ -391,10 +391,12 @@ async function addFiles(incoming, { replaceId = null, noteText } = {}) {
       files.splice(files.findIndex(file => file.id === replaceId), 1, ...additions);
       resetNoteEditor();
     } else files.push(...additions);
+    // Opening a homepage should not reserve a connection before there is anything to share.
+    if (!ws) await connect();
     publishPreview();
     addFeedback(peer?.sending ? 'Added. These files will send next.' : duplicates ? 'Skipped files already in this handoff.' : '');
     if (!peer?.ready || peer.closed) {
-      status('Ready to send', 'They open the link and accept your files.', 'active');
+      status(room ? 'Ready to send' : 'Creating your link…', room ? 'They open the link and accept your files.' : 'Keep this tab open.', 'active');
       $('lead').textContent = 'Files added. Copy the link to send them.';
       highlightShare(firstAddition);
     }
@@ -485,7 +487,6 @@ function renderFiles() {
   }
   updateMobileAction();
 }
-function safeName(name) { return name.replace(/[\\/\x00-\x1f\x7f]/g, '_').replace(/^\.+/, '_') || 'file'; }
 async function connect() {
   ended = false; $('retry').hidden = true; notice('');
   if (!isSender && destinationParent) {
@@ -620,7 +621,7 @@ $('note').addEventListener('paste', event => {
   }
 });
 $('add-note').onclick = async () => {
-  const text = $('note').value.trim(); if (!text) { $('note').focus(); return; }
+  const text = $('note').value; if (!text.trim()) { $('note').focus(); return; }
   let name = editingId ? files.find(file => file.id === editingId).name : 'HANDOFF.md', n = 2;
   if (!editingId) while (files.some(file => file.name === name)) name = `HANDOFF-${n++}.md`;
   if (await addFiles([new File([text + '\n'], name, { type: 'text/markdown' })], { replaceId: editingId, noteText: text })) resetNoteEditor();
@@ -659,7 +660,7 @@ if (!isSender) {
 }
 try {
   key = await importSecret(secret);
-  if (isSender) await connect();
+  if (isSender) status('Ready when you are', 'Add files or a note to create your link.');
   else { status('Checking the sender…', ''); await checkInvite(); }
 } catch (error) { fail(error); }
 

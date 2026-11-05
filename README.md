@@ -8,7 +8,9 @@ Live at https://meatproxy.to. Files and notes move between two peers; the server
 2. Open that complete link in another browser or device and choose **Accept files**. No peer connection or file transfer starts before acceptance.
 3. Keep both tabs open until delivery is verified. A single file downloads in its original format; multiple files can be saved together as a ZIP. Save them before closing the receiving tab.
 
-Notes become `HANDOFF.md`. The receiving page can copy text for an agent. Nothing received is executed automatically.
+Notes become `HANDOFF.md`. Adding or editing a note keeps its whitespace, with a final newline added to the file. The receiving page can copy text for an agent. Nothing received is executed automatically.
+
+Long Unicode filenames work within the same 100-file limit. Saved filenames are shortened only as needed to fit the common 255-byte filename limit, including room for duplicate numbering; extensions are preserved when they fit.
 
 The Note tab has **Fix formatting** enabled by default. Pasting joins hard-wrapped prose and list continuations and removes terminal margins, while keeping paragraph breaks, list items, and fenced code blocks. Uncheck it to paste with the original spacing and line breaks. Typing and existing note text are left as entered.
 
@@ -45,7 +47,7 @@ npm run build
 npm start
 ```
 
-Open http://localhost:3477. The first page creates a room; its address becomes the recipient URL. `npm run build` bundles the shared crypto protocol and the Node receiver source into `public/receive.mjs`, builds the browser file worker, and regenerates the brand images. Regenerate it after changes to these sources. The file worker uses the pinned `@noble/hashes` SHA-256 implementation; its MIT license is shipped as `public/hashes-LICENSE.txt`. Build dependencies are not loaded from a CDN or needed by the production server. The server reads and fingerprints `public/` when it starts, so restart it after changing those files.
+Open http://localhost:3477. Once the first file or note is prepared, the page opens the sender connection and creates a room; its address becomes the recipient URL. Empty homepage tabs do not hold connections. `npm run build` bundles the shared crypto protocol and the Node receiver source into `public/receive.mjs`, builds the browser file worker, and regenerates the brand images. Regenerate it after changes to these sources. The file worker uses the pinned `@noble/hashes` SHA-256 implementation; its MIT license is shipped as `public/hashes-LICENSE.txt`. Build dependencies are not loaded from a CDN or needed by the production server. The server reads and fingerprints `public/` when it starts, so restart it after changing those files.
 
 ```sh
 npm run check

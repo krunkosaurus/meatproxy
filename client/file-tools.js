@@ -1,17 +1,8 @@
 import { sha256 } from '@noble/hashes/sha2.js';
+import { safeName, uniqueName } from '../public/filenames.js';
 
 export const READ_BYTES = 1024 * 1024;
 const hex = bytes => Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
-const safeName = name => name.replace(/[\\/\x00-\x1f\x7f]/g, '_').replace(/^\.+/, '_') || 'file';
-
-export function uniqueName(name, used) {
-  const original = safeName(name);
-  let result = original, number = 2;
-  // Two selected files can have the same name, including on case-insensitive disks.
-  while (used.has(result.toLowerCase())) result = `${number++}-${original}`;
-  used.add(result.toLowerCase());
-  return result;
-}
 
 export async function hashFile(file, onProgress = () => {}) {
   const hash = sha256.create();
@@ -36,13 +27,13 @@ export class IncomingFile {
     const file = new IncomingFile(meta);
     if (directory) {
       file.directory = directory;
-      file.name = name;
+      file.name = safeName(name);
       try {
         // Ask the filesystem too: different Unicode names can alias on a local disk.
         for (let number = 2; ; number++) {
           try { await directory.getFileHandle(file.name); }
           catch (error) { if (error.name === 'NotFoundError') break; throw error; }
-          file.name = `${number}-${name}`;
+          file.name = safeName(name, number);
         }
         file.handle = await directory.getFileHandle(file.name, { create: true });
         file.writer = await file.handle.createWritable();

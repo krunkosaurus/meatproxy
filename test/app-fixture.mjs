@@ -54,6 +54,7 @@ parentPort.on('message', async ({ id, command, ...args }) => {
     if (command === 'snapshot') result = {
       link: $('share-link').value, status: $('status').textContent, detail: $('status-detail').textContent, notice: $('notice').textContent, retry: !$('retry').hidden,
       feedback: $('add-feedback').textContent, summary: $('queue-summary').textContent,
+      socketCount: sockets.length, copyDisabled: $('copy-link').disabled, commandDisabled: $('copy-command').disabled,
       mobile: { label: $('mobile-action').textContent, disabled: $('mobile-action').disabled, action: $('mobile-action').dataset.action },
       rows: [...document.querySelectorAll('.file-row')].map(row => ({
         name: row.querySelector('.file-name').textContent, detail: row.querySelector('small').textContent,
@@ -69,6 +70,7 @@ parentPort.on('message', async ({ id, command, ...args }) => {
     } else if (command === 'resume') resume();
     else if (command === 'leave') for (const socket of sockets) socket.close();
     else if (command === 'blockClipboard') clipboardBlocked = true;
+    else if (command === 'previewNames') { $('preview-names').checked = args.enabled; $('preview-names').onchange(); }
     else if (command === 'add') {
       const files = args.files.map(({ name, size, byte = 71 }) => new File([new Uint8Array(size).fill(byte)], name));
       $('file-input').onchange({ target: { files, value: '' } });
