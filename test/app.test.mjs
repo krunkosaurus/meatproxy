@@ -13,7 +13,7 @@ import { connect as connectTCP } from 'node:net';
 import { WebSocketServer } from 'ws';
 import { createApp } from '../server.mjs';
 import { makeSecret, importSecret, encrypt, encodeJSON, toBase64 } from '../public/protocol.js';
-import { terminalTable, collapsedTerminalNote, restoredTerminalNote } from './note-formatting-fixture.mjs';
+import { terminalTable, collapsedTerminalNote, restoredTerminalNote, pastedTerminalBullets, alignedTerminalBullets } from './note-formatting-fixture.mjs';
 
 async function page(t, url, options = {}) {
   const worker = new Worker(new URL('./app-fixture.mjs', import.meta.url), { workerData: { url, ...options } });
@@ -140,6 +140,18 @@ test('actual paste restores a boxed table in the editor and delivers its row bre
   await receiver.run('click', { element: 'download-all' });
   const [download] = await receiver.run('downloads');
   assert.equal(download.sha256, createHash('sha256').update(restoredTerminalNote + '\n').digest('hex'));
+});
+
+test('actual paste left-aligns terminal bullet items and keeps them aligned when editing the saved note', { timeout: 15000 }, async t => {
+  const sender = await page(t, await server(t));
+  await sender.run('paste', { text: '  • Just one item' });
+  assert.equal((await sender.run('snapshot')).note, '• Just one item');
+  await sender.run('paste', { text: pastedTerminalBullets });
+  assert.equal((await sender.run('snapshot')).note, alignedTerminalBullets);
+  await sender.run('click', { element: 'add-note' });
+  await sender.until(s => s.rows.length === 1 && s.link.startsWith('http'));
+  await sender.run('click', { label: 'Edit HANDOFF.md' });
+  assert.equal((await sender.run('snapshot')).note, alignedTerminalBullets);
 });
 
 test('actual composer removes files, edits/cancels notes and updates capacity', { timeout: 15000 }, async t => {

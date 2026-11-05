@@ -18,3 +18,23 @@ Our system calculated each job's cost itself instead of recording ExampleAPI's a
 `;
 export const collapsedTerminalNote = introduction + terminalTable.replaceAll('\n', ' ');
 export const restoredTerminalNote = introduction + terminalTable;
+
+export const pastedTerminalBullets = `• The overall results look reassuring.
+
+  • CPU: No recent processor errors were found.
+
+  • RAM: The memory diagnostic passed.
+
+  • SSD: The storage reports healthy.
+
+  • Graphics: One cooling problem needs attention.`;
+
+export const alignedTerminalBullets = `• The overall results look reassuring.
+
+• CPU: No recent processor errors were found.
+
+• RAM: The memory diagnostic passed.
+
+• SSD: The storage reports healthy.
+
+• Graphics: One cooling problem needs attention.`;
