@@ -47,7 +47,7 @@ const nextMessageOrClose = ws => Promise.race([message(ws), once(ws, 'close').th
 test('browser worker and imported handoff modules are served as JavaScript', async t => {
   const { app } = await setup(t);
   const base = `http://127.0.0.1:${app.server.address().port}`;
-  for (const path of ['/file-worker.js', '/file-tasks.js', '/handoff.js']) {
+  for (const path of ['/file-worker.js', '/file-tasks.js', '/handoff.js', '/note-formatting.js']) {
     const response = await fetch(base + path);
     assert.equal(response.status, 200, path);
     assert.match(response.headers.get('content-type'), /text\/javascript/);

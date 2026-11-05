@@ -2,6 +2,7 @@ import { MAX_BYTES, MAX_FILES, CHUNK_BYTES, makeSecret, importSecret, encrypt, d
 import { streamFile, TransferMeter, waitForDataChannel, createWaiters } from './transfer.js';
 import { FileTasks } from './file-tasks.js';
 import { prepareAdditions } from './handoff.js';
+import { fixNoteFormatting } from './note-formatting.js';
 
 const $ = id => document.getElementById(id);
 const isSender = location.pathname === '/';
@@ -603,6 +604,21 @@ for (const name of ['dragleave', 'drop']) $('dropzone').addEventListener(name, e
 $('dropzone').ondrop = event => addFiles([...event.dataTransfer.files]);
 window.addEventListener('dragover', event => event.preventDefault());
 window.addEventListener('drop', event => event.preventDefault());
+$('note').addEventListener('paste', event => {
+  if (!$('fix-formatting').checked) return;
+  const text = event.clipboardData.getData('text/plain');
+  const cleaned = fixNoteFormatting(text);
+  if (cleaned === text) return;
+  const note = $('note');
+  const available = note.maxLength - (note.value.length - (note.selectionEnd - note.selectionStart));
+  const insertion = cleaned.slice(0, Math.max(0, available));
+  event.preventDefault();
+  // Use the browser's editing command so the paste remains one undoable edit.
+  if (!document.execCommand('insertText', false, insertion)) {
+    note.setRangeText(insertion, note.selectionStart, note.selectionEnd, 'end');
+    note.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+});
 $('add-note').onclick = async () => {
   const text = $('note').value.trim(); if (!text) { $('note').focus(); return; }
   let name = editingId ? files.find(file => file.id === editingId).name : 'HANDOFF.md', n = 2;
