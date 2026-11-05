@@ -12,7 +12,7 @@ Notes become `HANDOFF.md`. Adding or editing a note keeps its whitespace, with a
 
 Long Unicode filenames work within the same 100-file limit. Saved filenames are shortened only as needed to fit the common 255-byte filename limit, including room for duplicate numbering; extensions are preserved when they fit.
 
-The Note tab has **Fix formatting** enabled by default. Pasting joins hard-wrapped prose and list continuations and removes terminal margins, while keeping paragraph breaks, list items, and fenced code blocks. Uncheck it to paste with the original spacing and line breaks. Typing and existing note text are left as entered.
+The Note tab has **Fix formatting** enabled by default. Pasting joins hard-wrapped prose and list continuations and removes terminal margins, while keeping paragraph breaks, list items, fenced code blocks, and terminal box-table rows. A complete box table copied onto one line gets its row breaks restored. Uncheck it to paste with the original spacing and line breaks. Typing and existing note text are left as entered.
 
 Added files appear in an expanded list after preparation, the drop area becomes **Add more**, and the share card highlights the next step. Selecting the same filename and contents again does not add a duplicate; different contents with the same filename are retained. During transfer, both browsers show recent KB/s or MB/s and an approximate time remaining. Sender progress counts receiver-confirmed bytes, and completion still requires SHA-256 verification.
 
