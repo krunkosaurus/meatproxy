@@ -1,45 +1,113 @@
 # Meatproxy
 
-Live at https://meatproxy.to. Files and notes move between two peers; the server holds live connection state, public preview metadata, and encrypted relay traffic.
+**Send files and notes to anyone, or to their AI agent, with one link.**
 
-## Use
+Free. No signup. Nothing stored on a server. Try it at **[meatproxy.to](https://meatproxy.to)**.
 
-1. Open the homepage, drop files or add a note, and copy the private link.
-2. Open that complete link in another browser or device and choose **Accept files**. No peer connection or file transfer starts before acceptance.
-3. Keep both tabs open until delivery is verified. A single file downloads in its original format; multiple files can be saved together as a ZIP. Save them before closing the receiving tab.
+<p align="center">
+  <img src="docs/paste-clean.gif" width="560" alt="Text copied from a terminal is pasted into Meatproxy's Note tab, where its broken line wraps and stray indentation are cleaned up.">
+</p>
 
-Notes become `HANDOFF.md`. Adding or editing a note keeps its whitespace, with a final newline added to the file. The receiving page can copy text for an agent. Nothing received is executed automatically.
+## Why
 
-Long Unicode filenames work within the same 100-file limit. Saved filenames are shortened only as needed to fit the common 255-byte filename limit, including room for duplicate numbering; extensions are preserved when they fit.
+AI agents are good at making things and bad at passing them along. So you become the meat proxy: copy the output from one agent, paste it into the next, email yourself a zip to get it onto the other machine.
 
-The Note tab has **Fix formatting** enabled by default. Pasting joins hard-wrapped prose and list continuations and removes terminal margins, while keeping paragraph breaks, list items, fenced code blocks, and terminal box-table rows. A complete box table copied onto one line gets its row breaks restored. Uncheck it to paste with the original spacing and line breaks. Typing and existing note text are left as entered.
+Meatproxy makes that hop painless. Drop in files or paste a note, share the link, and the other side has it a moment later, whether that is a person or the agent they work with.
 
-Added files appear in an expanded list after preparation, the drop area becomes **Add more**, and the share card highlights the next step. Selecting the same filename and contents again does not add a duplicate; different contents with the same filename are retained. During transfer, both browsers show recent KB/s or MB/s and an approximate time remaining. Sender progress counts receiver-confirmed bytes, and completion still requires SHA-256 verification.
+## What you get
 
-On phones, a fixed action bar keeps sharing, transfer progress, and saving within reach as the file list grows. It opens native link sharing when available and otherwise copies the link. The bar includes the keep-open reminder and leaves room for the page content and device safe area. Filename-preview controls are under **Link preview options**.
+- **One link, no account.** Add files or a note, copy the link, send it any way you like.
+- **Straight from your browser to theirs.** Transfers go peer to peer over WebRTC. We introduce the two browsers and step aside. Your files are never stored on our server.
+- **Encrypted.** The key is part of the link and never reaches the server.
+- **Clean paste from the terminal.** Text copied out of a terminal arrives with broken line wraps and stray indentation. Paste it into a note and it is fixed for you. [See it below](#paste-clean).
+- **Made for agents.** The receiving side can collect everything with one command. Files land in a folder and notes arrive as `HANDOFF.md`.
+- **Phone or desktop.** It runs in the browser on both. Nothing to install.
+- **Verified on arrival.** Every file is checksummed before it counts as delivered.
+- **Link previews that tell the truth.** Paste the link into a chat and the preview shows whether the sender is still online, how many files there are and how big. Filenames stay private unless you choose to show them.
 
-The file list shows the count and total size against the 100-file / 512 MiB limits. Remove files or edit notes created in the page before they are announced to a recipient. Saving an edit replaces that note; canceling retains its original contents. An open note edit is held back until saved or canceled. Files already announced to the connected receiver are locked for that connection. Added files and notes are queued while a transfer is running, then included in the next manifest before the handoff is marked complete. Invalid selections leave the existing handoff unchanged.
+Any file type, up to 100 files and 512 MB per link.
 
-The current prototype supports one connected recipient per link. A second recipient can connect after the first leaves. Links expire when the sender closes/reloads their page, the signaling connection ends, or 12 hours elapse. Sender file handles are held only in the page; refreshing cannot restore them. Files added after the initial delivery are sent while the browser receiver stays connected.
+## How to use it
 
-For large handoffs, supporting browsers offer **Receive to a folder** before acceptance. Choose a destination and Meatproxy creates a new subfolder for this connection, streams incoming files to disk, and commits each file only after SHA-256 verification. Duplicate filenames get numbered names; existing files outside the new folder are untouched. A failed file is aborted and its unfinished entry is removed. Completed files remain saved if a later file fails. Reconnecting creates another subfolder.
+1. Open [meatproxy.to](https://meatproxy.to) and drop in files or write a note.
+2. Copy the link and send it to the other person.
+3. They open it and choose **Accept files**. Nothing moves until they do.
+4. Keep both tabs open until it finishes. Then they save the files.
 
-The regular **Accept files** flow works without folder access. It retains browser-managed Blobs for downloading, so very large handoffs can still use substantial browser storage or memory. Both flows hash incrementally in a worker, using bounded reads and receive buffers instead of full-file JavaScript arrays. Multiple-file ZIP checksums also run in a separate worker, with preparation progress, so saving does not block the interface or incoming acknowledgements. File-system access is feature-detected; browsers without the folder picker use the regular download flow.
+## Paste clean
 
-Mobile backgrounding, device sleep, Safari, and Firefox have not yet been verified. This prototype restarts interrupted transfers rather than resuming partial files. If the sender's page sends nothing for a minute while files remain, the receiving page says so and offers Reconnect, and clears the warning if data arrives again (for example after a slow read of the sender's file). A browser that freezes the sender's tab usually drops its connection, which ends the handoff. Reconnecting starts the handoff over and clears the files already received on the page, so save them first; it is not offered once the sender has left. A sender waits 30 seconds for the receiver to confirm each saved file, so a save that takes longer (for example a very large file written to a slow folder) can make the sender give up. Folder hierarchy is not preserved.
+Copy an agent's reply out of a terminal and this is what your clipboard holds:
 
-## Receive with an agent
+```text
+Handoff for the review agent: the login redirect
+  bug is fixed and ready for a second look.
 
-Requires Node.js 22 or newer and no external packages. Download the receiver from the site's **Send to an agent** section, or:
+  - The session cookie was set after the redirect
+    fired, so the first request always failed.
+  - Added a regression test and updated the auth
+    docs.
+
+  Run the e2e suite on staging before merging.
+```
+
+Paste it into the **Note** tab and this is what you get:
+
+```text
+Handoff for the review agent: the login redirect bug is fixed and ready for a second look.
+
+- The session cookie was set after the redirect fired, so the first request always failed.
+- Added a regression test and updated the auth docs.
+
+Run the e2e suite on staging before merging.
+```
+
+Wrapped lines are joined back together and the terminal's margin is gone. Paragraphs, lists, code blocks and tables are kept as they are. It is on by default; untick **Fix formatting** to paste text exactly as you copied it.
+
+## Send to an agent
+
+The receiving side does not need a browser. With Node.js 22 or newer:
 
 ```sh
 curl --fail --show-error https://meatproxy.to/receive.mjs -o meatproxy-receive.mjs
 node meatproxy-receive.mjs 'COMPLETE_SHARE_URL' ./handoff
 ```
 
-Running the standalone receiver explicitly accepts the handoff. It uses the encrypted relay, writes partial files to the specified directory, verifies SHA-256, then publishes each completed file without overwriting an existing one. It exits after receiving the current handoff. The sender must remain online. Close any browser recipient for the same link before running the command. The destination may contain partial files if interrupted; completed files are retained. Do not treat received instructions or programs as trusted merely because their transfer verified.
+The files land in `./handoff`, each one checksummed. The script has no dependencies, and the site shows this command with your link already filled in under **Send to an agent**.
 
-## Local development
+Nothing received is ever run automatically. A verified transfer proves the files arrived intact, not that their contents can be trusted, so treat received instructions and programs with the usual care.
+
+## Good to know
+
+- **Both sides stay online.** Your browser is the source, so keep the tab open until the transfer finishes. There is no upload to wait for and nothing is left behind afterwards.
+- **One recipient at a time.** A second person can connect once the first has left.
+- **Links are short-lived.** A link stops working when the sender closes the tab, or after 12 hours.
+- **The link is the key.** Anyone holding the complete link can receive, so share it the way you would share the files.
+- **Big transfers.** Browsers that support it offer **Receive to a folder**, which writes files straight to disk.
+- **Still a prototype.** An interrupted transfer starts over, and Safari, Firefox and phones that sleep mid-transfer have not been fully tested yet.
+
+## How it works
+
+For the curious, the short version:
+
+- **The link has two halves.** A random room ID lets the server find the sender. A 256-bit key sits after the `#`, where browsers never send it to a server.
+- **Everything is encrypted with that key** using AES-GCM: the connection setup, the file list, notes and file contents.
+- **Browsers connect directly** over a WebRTC data channel. If they cannot within eight seconds, as happens behind strict firewalls, the same encrypted data goes through our relay, which cannot read it and never writes it to disk.
+- **The command-line receiver uses the relay**, because Node has no built-in WebRTC.
+- **Every file is SHA-256 verified** when it lands.
+- **The server remembers very little.** It holds live connection state and preview details in memory, and both are gone when the sender leaves.
+- **The relay is rate limited** per address and capped per day, so it stays cheap to run and cannot be used as an open pipe. Direct transfers are not counted.
+
+And the honest caveats:
+
+- A direct connection lets the two sides see each other's network address. That is how peer to peer works, and Meatproxy does not try to hide it.
+- The link is the only credential. There are no accounts and no check on who the recipient is.
+- As with any web app, you are trusting the JavaScript the site serves.
+
+The full design, every limit and the reasoning behind them: [docs/how-it-works.md](docs/how-it-works.md).
+
+## Run it yourself
+
+Requires Node.js 22 or newer.
 
 ```sh
 npm ci
@@ -47,59 +115,11 @@ npm run build
 npm start
 ```
 
-Open http://localhost:3477. Once the first file or note is prepared, the page opens the sender connection and creates a room; its address becomes the recipient URL. Empty homepage tabs do not hold connections. `npm run build` bundles the shared crypto protocol and the Node receiver source into `public/receive.mjs`, builds the browser file worker, and regenerates the brand images. Regenerate it after changes to these sources. The file worker uses the pinned `@noble/hashes` SHA-256 implementation; its MIT license is shipped as `public/hashes-LICENSE.txt`. Build dependencies are not loaded from a CDN or needed by the production server. The server reads and fingerprints `public/` when it starts, so restart it after changing those files.
+Open http://localhost:3477. To check your changes:
 
 ```sh
 npm run check
 npm test
 ```
 
-For a real browser fallback test, keep the normal server running and run `node test/blocked-direct-proxy.mjs`. Open http://localhost:3478 in two browser tabs. The fixture suppresses initial WebRTC signaling so the production browser code must fall back to the encrypted relay after eight seconds. This test fixture is not deployed.
-
-For a repeatable latency benchmark, run `node test/latency-proxy.mjs` with the normal server running. Open http://localhost:3479 and receive its complete link with the Node client. The fixture adds 50 ms per WebSocket hop, producing approximately 200 ms of added round-trip latency between the two peers. It is not deployed.
-
-## Branding and link previews
-
-The two folded pieces in `public/logo.svg` form the Meatproxy M. `npm run build:brand` generates the matching SVG/PNG favicons, Apple touch icon, and 1200 × 630 social images from this mark, `brand/social.svg`, and `brand/handoff.svg`. The renderer is a development dependency; the server only serves the finished assets. The bundled Atkinson Hyperlegible fonts are licensed under the [SIL Open Font License](brand/fonts/OFL.txt), sourced from [Google Fonts](https://github.com/google/fonts/tree/main/ofl/atkinsonhyperlegible).
-
-The page includes [Open Graph](https://ogp.me/) metadata and a large-image Twitter/X card. Handoff previews use the room URL without its secret fragment and show whether the sender is online, busy, or offline when fetched, plus file count and total size. **Show filenames in preview** is off by default. Enabling it publishes up to three filenames (shortened for previews) to the server and anyone with the room URL, including chat apps. Turning it off removes names from subsequent responses, but cannot erase copies already cached by a chat app. The server reads the sender's messages in order, so during a relayed transfer the change takes effect only after file data already sent ahead of it has been delivered, which can take tens of seconds on a slow or stalled connection. Notes, file contents, and encryption keys never appear in previews.
-
-Preview metadata is held only in room memory and removed when the sender leaves. Fetching the HTML or `/s/:room/status` never joins the transfer or occupies the recipient slot. Before acceptance, the receiving page checks availability every ten seconds; the actual join checks availability again. This is a connection-status check, not a guarantee that a backgrounded sender can transfer immediately. Chat previews are snapshots and may remain cached (for example, [Slack caches unfurls](https://api.slack.com/robots)). `robots.txt` permits preview fetching; handoff pages and their status responses retain `noindex, nofollow` and `Cache-Control: no-store, no-transform`.
-
-## Transfer design
-
-- A 128-bit random room ID locates a live sender. A separate 256-bit key is carried in the URL fragment; the application never transmits that key to the server.
-- AES-GCM encrypts signaling, the transfer manifest, notes, and file chunks. Filenames are also published separately only when the sender opts into filename previews. Each encrypted packet uses a random 96-bit IV; data packets also bind the room, fresh connection ID, direction, and ordered sequence.
-- The browser tries an ordered WebRTC data channel using Cloudflare's public STUN service. If the connection cannot be established within eight seconds, the same encrypted payloads travel over a WebSocket relay. No TURN account is required.
-- Files are read in 1 MiB blocks and streamed in 16 KiB encrypted chunks. Receivers acknowledge each 256 KiB; senders pipeline these acknowledgements with at most 4 MiB outstanding on either transport. When a relayed receiver falls behind, the relay stops reading from the sender until the receiver catches up, so TCP slows the sender instead of the relay buffering or disconnecting it. Any message from a socket counts as a sign of life, because a slow upload can hold the reply to a liveness check behind queued file data. After a receiver leaves, the relay drops the sender's data until the sender's first signal for the next receiver, so a new receiver never gets ciphertext meant for the previous one. The new receiver's connection waits until that data has crossed the sender's upload, which can take tens of seconds on a slow connection; the command-line receiver gives up after 60 seconds without activity. The sender's acknowledgement deadline is 30 seconds since the last acknowledgement, not since each chunk was sent, so a slow link draining a full window does not time out. A transfer also stops if 30 seconds pass without the sender's WebSocket or data-channel buffer draining. Files that fit the window stream through to the final checksum without stopping for intermediate acknowledgements. Direct transfers resume on WebRTC's buffer-drain event instead of polling a timer. Every completed file is SHA-256 verified. WebSocket and data-channel buffers remain bounded.
-- The relay never writes transferred files to disk. Room state is in process memory. The Nginx vhost disables access logs; error logs can still contain connection metadata. The service logs one line of totals per UTC day and at shutdown, with no addresses (see Hosting). Cloudflare may retain traffic metadata under the account's policies.
-- Anyone holding the complete link can receive the handoff. This is a capability link, not verified recipient identity. The web application and code delivered by the origin/Cloudflare remain trusted; encryption does not protect against a compromised application delivering malicious JavaScript.
-- Direct WebRTC can expose network addresses to the other peer; see [WebRTC IP address handling](https://www.rfc-editor.org/rfc/rfc8828). Falling back to a relay after trying direct does not retract addresses already shared during connection setup. A relay-only mode would need to avoid direct setup from the start; this version defaults to direct and has no such privacy switch. Relaying adds a server path and bandwidth costs, but does not inherently halve throughput because data is forwarded as it arrives.
-- Public resource limits: at most 200 connected sockets, 64 KiB per WebSocket message, relay buffering that pauses a sender once 512 KiB or 256 messages are waiting for its receiver, a 12-hour room lifetime, and a 10-second initial handshake deadline. The service has CPU and memory limits to protect the shared host.
-- The relay enforces the handoff limits itself, so a modified client cannot use it as an open pipe:
-  - Each receiver connection relays at most one full handoff from the sender (512 MiB plus 64 MiB for encryption and control messages) and 8 MiB back, and each side may send 32 KiB of connection-setup signals, counted in bytes on the wire (setup takes about 5–15 KB). Every relayed message and signal also counts 64 bytes for its framing, TLS and TCP overhead, so a flood of tiny messages cannot cost more than it is charged.
-  - Limits count one customer as one address: an IPv4 address, or an IPv6 /56, the block ISPs commonly delegate to one household. A network is an IPv4 /24 or IPv6 /48. Users who share one IPv4 address, as behind carrier NAT, share its allowances.
-  - Relayed bytes count against the receiving side: 1,152 MiB per day for one address, enough for two full handoffs, 4,608 MiB per day for one network, and 10 GiB per day for the whole relay. A link may relay 2 GiB over its life.
-  - A relay session reserves its allowance 64 MiB at a time as it relays, so an idle session holds little. When an allowance runs out, only that receiver's connection closes, with the reason; the sender's link stays open, and the unused part of the last reservation returns.
-  - Connection-setup signals have their own daily allowance, so a spent relay allowance never blocks a direct WebRTC connection: 16 MiB per address, enough for about a thousand handoffs a day, and 256 MiB per network. A network's allowance is 16 addresses' worth, so one neighbour cannot spend it.
-  - When a handoff is about to start through the relay and the remaining allowances cannot carry what the sender has declared, the relay refuses it at the start rather than partway. If a limit stops a transfer partway, the receiving page keeps the files already received, says to save them, and marks the interrupted file.
-  - Each address may hold 8 connections and each network 32, so one neighbour cannot fill its network, and filling the service's 200 connections takes at least seven networks. Up to twice the address's limit, a connection is accepted only to be closed with a reason the page can show; these refusals take none of the 200 or of the network's 32, and are limited to 20 at once. Beyond that, connections are refused before the WebSocket handshake.
-  - When a limit closes a connection, the relay sends a close code that each page words for its reader, and the command-line receiver prints the reason. The other side is told too.
-  - Daily counts reset at midnight UTC and when the service restarts. Direct WebRTC transfers do not use the relay and are not counted.
-- Each address and network also has a budget of server work, so no client can take the service's CPU through its connections, whether by relaying or by flooding small messages, pings or pongs. Every message, ping and pong costs its size plus 4 KiB, in proportion to the CPU each takes, and a message may have at most 16 fragments. An address may spend 16 MiB a second and a network 64 MiB, each up to two seconds ahead, and may fall at most two seconds behind, so one address cannot hold its network's sockets for longer than that. A socket over budget is not read until it is back in credit, so TCP slows that client rather than closing it, and a client that keeps a reply waiting is not answered; relayed file data from one address therefore runs at up to about 12 MiB/s, above the relay speeds seen in production. This budget covers connections, not the HTTP requests that serve pages and previews: refusing a request costs about as much as answering it, so limit those at the proxy (see Hosting).
-
-## Hosting
-
-Run the app as its own unprivileged service behind an HTTPS reverse proxy. It listens on `127.0.0.1:3477` by default; set `PORT` to change the port and `PUBLIC_ORIGIN` to the public HTTPS origin. Forward WebSocket upgrades for `/socket`, disable proxy buffering and caching, and allow idle WebSocket connections for at least 90 seconds. Use `/healthz` for health checks.
-
-Soon after each midnight UTC, the service writes one JSON line to standard output (`"event":"daily-usage"`) with the previous day's totals: relay allowance used (`relayedBytes`, including overhead and slices still reserved), signal bytes, rooms created, peak sockets, sockets slowed for their work budget (`throttled`), connections refused with 429 before the WebSocket handshake (`refused`), and connections closed by each limit, by close code (`closedByLimit`). A restart resets the day's counts, so the service writes the same totals as `"event":"usage-at-shutdown"` when it stops. The lines contain no addresses or room IDs. Under systemd, read them with `journalctl -u <service>`.
-
-Limit the rate of HTTP requests and new connections per client address at the proxy or CDN; the application's work budget covers what happens on a connection, not the cost of answering requests. In Nginx, a `limit_req_zone` keyed on `$binary_remote_addr` with a `limit_req` in the proxied location, and a `limit_conn` on the same key, are enough; Cloudflare rate-limiting rules can do it ahead of the origin. An `upstream` block with `keepalive` would also spare the application a connection per request, but it needs `proxy_set_header Connection ""`, which one location cannot combine with forwarding WebSocket upgrades; give it a separate location, or set the header from a `map` over `$http_upgrade`.
-
-The per-address limits read the client's address from `X-Real-IP`, so the proxy must always set that header itself, overwriting any value a client sent. Without the header, as when running locally without a proxy, no per-address limits apply; the per-link and whole-relay limits still do. Behind Cloudflare, set the address from `CF-Connecting-IP` only for requests from [Cloudflare's address ranges](https://www.cloudflare.com/ips/) (Nginx: `set_real_ip_from` for each range, `real_ip_header CF-Connecting-IP`, and `proxy_set_header X-Real-IP $remote_addr` in the proxied location).
-
-Pages reference scripts, styles, and images as `/file?v=<version>`, where the version is the start of a SHA-256 over the response headers and the file after its own references are versioned. A module's version therefore changes when anything it imports changes. Only a request for the current version gets `Cache-Control: public, max-age=31536000, immutable`, which lets browsers keep it; Cloudflare's default rules also cache the `.js`, `.css`, `.png`, and `.svg` files, but not `.mjs` or `.txt`. Pages, status responses, and unversioned or outdated asset URLs stay `no-store, no-transform`; `no-transform` stops Cloudflare adding its Web Analytics script to pages, which the content security policy would block. Each release computes versions from its own files when the service starts, so a deploy gives every changed file a new URL without purging any cache. Versions cover only headers the application sets; after changing headers that Nginx or Cloudflare add to responses, purge Cloudflare's cache. Versioned URLs depend on Cloudflare including the query string in its cache key, as its default caching level does. `/receive.mjs` stays available without a version for the command-line download.
-
-Cloudflare can proxy the domain and terminate public TLS. Use **Full (Strict)** with a valid certificate at the origin. Keep the application process and virtual host separate from other sites. A service restart ends active rooms, so preserve the previous release for rollback.
-
-Machine-specific deployment notes, host inventories, test artifacts, credentials, and local backups are excluded from this repository.
+Putting it behind a reverse proxy, rate limits, caching and Cloudflare are covered in [docs/hosting.md](docs/hosting.md).
