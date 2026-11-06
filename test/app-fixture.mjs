@@ -19,6 +19,8 @@ Object.assign(globalThis, {
   window: { addEventListener() {} },
   history: { replaceState: (_, __, path) => { location.href = new URL(path, location).href; } },
   matchMedia: () => ({ matches: false }),
+  // Browsers parse a bare clipboard fragment into <body>; linkedom needs it explicit.
+  DOMParser: class { parseFromString(html) { return parseHTML(`<!doctype html><html><body>${html}</body></html>`).document; } },
   Worker: class {
     constructor() {
       this.thread = new Thread(`
@@ -89,7 +91,7 @@ parentPort.on('message', async ({ id, command, ...args }) => {
       };
       $('fix-formatting').checked = args.enabled ?? true;
       const event = new DOMEvent('paste', { bubbles: true, cancelable: true });
-      event.clipboardData = { getData: () => args.text };
+      event.clipboardData = { getData: type => type === 'text/html' ? args.html ?? '' : args.text };
       note.dispatchEvent(event);
       if (!event.defaultPrevented) note.setRangeText(args.text, note.selectionStart, note.selectionEnd);
     } else if (command === 'note') { $('note').value = args.text; await $('add-note').onclick(); }

@@ -104,3 +104,82 @@ export function fixNoteFormatting(text) {
   }
   return result.join('\n');
 }
+
+const skippedTags = new Set(['button', 'script', 'style']);
+const blockTags = new Set(['article', 'aside', 'dd', 'details', 'div', 'dl', 'dt', 'figcaption', 'figure', 'footer', 'header', 'li', 'main', 'nav', 'p', 'section', 'summary']);
+
+// Browsers copy a page's list items and table cells onto bare adjacent lines in
+// text/plain, which unwrapping would join. Their HTML still has the structure.
+export function noteFromHtml(root) {
+  if (!root.querySelector('table, ul, ol')) return null;
+  return blocksOf(root.childNodes).join('\n\n');
+}
+
+function blocksOf(nodes) {
+  const blocks = [];
+  let lines = [''];
+  const flush = () => {
+    const text = lines.map(line => line.replace(/[ \t\n\r\f\u00a0]+/g, ' ').trim()).join('\n').trim();
+    if (text) blocks.push(text);
+    lines = [''];
+  };
+  const visit = node => {
+    if (node.nodeType === 3) lines[lines.length - 1] += node.data;
+    if (node.nodeType !== 1 || skippedTags.has(node.localName)) return;
+    if (node.localName === 'br') {
+      // Marks where the copied selection began or ended, not a line break.
+      if (!/\bApple-interchange-newline\b/.test(node.getAttribute('class'))) lines.push('');
+      return;
+    }
+    const converted = convertBlock(node);
+    if (!converted) { for (const child of node.childNodes) visit(child); return; }
+    flush(); blocks.push(...converted);
+  };
+  for (const node of nodes) visit(node);
+  flush();
+  return blocks;
+}
+
+const flatten = node => blocksOf(node.childNodes).join(' ').replace(/\s*\n\s*/g, ' ');
+
+function convertBlock(node) {
+  const tag = node.localName, heading = tag.match(/^h([1-6])$/);
+  if (heading) { const text = flatten(node); return text ? [`${'#'.repeat(Number(heading[1]))} ${text}`] : []; }
+  if (tag === 'ul' || tag === 'ol') return listBlocks(node, tag === 'ol');
+  if (tag === 'table') return tableRecords(node);
+  if (tag === 'blockquote') {
+    const text = blocksOf(node.childNodes).join('\n\n');
+    return text ? [text.split('\n').map(line => line ? `> ${line}` : '>').join('\n')] : [];
+  }
+  if (tag === 'pre') {
+    // Chat apps put a language label and copy button beside the code element.
+    const code = (node.querySelector('code') ?? node).textContent.replace(/\n$/, '');
+    const fence = '`'.repeat(Math.max(3, ...(code.match(/`{3,}/g) ?? []).map(run => run.length + 1)));
+    return code.trim() ? [`${fence}\n${code}\n${fence}`] : [];
+  }
+  return blockTags.has(tag) ? blocksOf(node.childNodes) : null;
+}
+
+function listBlocks(list, ordered) {
+  let number = Number.parseInt(list.getAttribute('start'), 10);
+  if (Number.isNaN(number)) number = 1;
+  const items = [];
+  for (const child of list.children) {
+    const item = child.localName === 'li';
+    const marker = !item ? '' : ordered ? `${number++}. ` : '- ';
+    const text = blocksOf(item ? child.childNodes : [child]).join('\n');
+    if (text) items.push(marker + text.replace(/\n(?=[^\n])/g, `\n${' '.repeat(marker.length)}`));
+  }
+  return items.length ? [items.join('\n')] : [];
+}
+
+// Wide cells wrap unreadably in a text table, so each row repeats its column names.
+function tableRecords(table) {
+  const rows = [...table.querySelectorAll('tr')].filter(row => row.closest('table') === table)
+    .map(row => [...row.children].filter(cell => cell.localName === 'td' || cell.localName === 'th').map(flatten));
+  const [header = [], ...body] = rows;
+  const labels = body.length ? header : [];
+  return (body.length ? body : [header])
+    .map(cells => cells.map((cell, index) => cell && (labels[index] ? `${labels[index]}: ${cell}` : cell)).filter(Boolean).join('\n'))
+    .filter(Boolean);
+}

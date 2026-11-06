@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { fixNoteFormatting } from '../public/note-formatting.js';
-import { terminalTable, collapsedTerminalNote, restoredTerminalNote, pastedTerminalBullets, alignedTerminalBullets } from './note-formatting-fixture.mjs';
+import { parseHTML } from 'linkedom';
+import { fixNoteFormatting, noteFromHtml } from '../public/note-formatting.js';
+import { terminalTable, collapsedTerminalNote, restoredTerminalNote, pastedTerminalBullets, alignedTerminalBullets, pastedPageHtml, pastedPageText, pastedPageNote } from './note-formatting-fixture.mjs';
 
 const pasted = ` The best clue is the timing: Washington drops happen only from about 6 AM to 7 PM Pacific, and almost never
   from 8 PM to 5 AM. Starlink congestion usually peaks in the evening, so this follows daytime activity
@@ -101,4 +102,30 @@ test('leaves fenced, indented, inline and incomplete box-table examples alone', 
 test('handles Windows newlines without changing inline text, Unicode or paragraph spacing', () => {
   assert.equal(fixNoteFormatting('  café **bold**\r\n  continued 🙂\r\n\r\n\r\n  next'), 'café **bold** continued 🙂\n\n\nnext');
   for (const text of ['', '  ', '\n \n', 'keep  inline   spacing', ' space at either end ']) assert.equal(fixNoteFormatting(text), text);
+});
+
+// Browsers parse a bare clipboard fragment into <body>; linkedom needs it explicit.
+const body = html => parseHTML(`<!doctype html><html><body>${html}</body></html>`).document.body;
+
+test('rebuilds a copied chat answer from its HTML and repeats column names in each table row', () => {
+  assert.equal(noteFromHtml(body(pastedPageHtml)), pastedPageNote);
+  // Its plain-text alternative has no row or item boundaries that survive unwrapping.
+  assert.match(fixNoteFormatting(pastedPageText), /Assessment Keep the current host\tLowest effort/);
+});
+
+test('leaves copied pages without lists or tables to the plain-text cleanup', () => {
+  assert.equal(noteFromHtml(body('<p>One</p><p>Two <b>bold</b></p>')), null);
+});
+
+test('keeps headings, nested lists, list numbering, line breaks and code from copied pages', () => {
+  const html = '<h2>Steps</h2><ol start="3"><li><p>Install&nbsp; it</p><ul><li>Run it<br>twice</li></ul></li><li>Check</li></ol>'
+    + '<pre><div>bash</div><button>Copy code</button><code class="language-bash">if true; then\n  echo "a  b"\n\nfi\n</code></pre>'
+    + '<script>alert(1)</script><style>p { color: red }</style><pre><code>```js\nquoted fence\n```</code></pre>';
+  assert.equal(noteFromHtml(body(html)), '## Steps\n\n3. Install it\n   - Run it\n     twice\n4. Check\n\n```\nif true; then\n  echo "a  b"\n\nfi\n```\n\n````\n```js\nquoted fence\n```\n````');
+});
+
+test('labels table cells by column, including blank headers, one-row and nested tables', () => {
+  assert.equal(noteFromHtml(body('<table><tr><th></th><th>Cost</th></tr><tr><td>August</td><td>$2,500.00</td></tr><tr><td>September</td><td></td></tr></table>')), 'August\nCost: $2,500.00\n\nSeptember');
+  assert.equal(noteFromHtml(body('<table><tr><td>Only</td><td>row</td></tr></table>')), 'Only\nrow');
+  assert.equal(noteFromHtml(body('<table><tr><th>Name</th><th>Detail</th></tr><tr><td>A</td><td><table><tr><td>x</td><td>y</td></tr></table></td></tr></table>')), 'Name: A\nDetail: x y');
 });

@@ -2,7 +2,7 @@ import { MAX_BYTES, MAX_FILES, CHUNK_BYTES, makeSecret, importSecret, encrypt, d
 import { streamFile, TransferMeter, waitForDataChannel, createWaiters } from './transfer.js';
 import { FileTasks } from './file-tasks.js';
 import { prepareAdditions } from './handoff.js';
-import { fixNoteFormatting } from './note-formatting.js';
+import { fixNoteFormatting, noteFromHtml } from './note-formatting.js';
 import { safeName, uniqueName } from './filenames.js';
 
 const $ = id => document.getElementById(id);
@@ -608,7 +608,9 @@ window.addEventListener('drop', event => event.preventDefault());
 $('note').addEventListener('paste', event => {
   if (!$('fix-formatting').checked) return;
   const text = event.clipboardData.getData('text/plain');
-  const cleaned = fixNoteFormatting(text);
+  const html = event.clipboardData.getData('text/html');
+  // DOMParser documents are inert: copied scripts and images never run or load.
+  const cleaned = (html && noteFromHtml(new DOMParser().parseFromString(html, 'text/html').body)) || fixNoteFormatting(text);
   if (cleaned === text) return;
   const note = $('note');
   const available = note.maxLength - (note.value.length - (note.selectionEnd - note.selectionStart));

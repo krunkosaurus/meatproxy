@@ -13,7 +13,7 @@ import { connect as connectTCP } from 'node:net';
 import { WebSocketServer } from 'ws';
 import { createApp } from '../server.mjs';
 import { makeSecret, importSecret, encrypt, encodeJSON, toBase64 } from '../public/protocol.js';
-import { terminalTable, collapsedTerminalNote, restoredTerminalNote, pastedTerminalBullets, alignedTerminalBullets } from './note-formatting-fixture.mjs';
+import { terminalTable, collapsedTerminalNote, restoredTerminalNote, pastedTerminalBullets, alignedTerminalBullets, pastedPageHtml, pastedPageText, pastedPageNote } from './note-formatting-fixture.mjs';
 
 async function page(t, url, options = {}) {
   const worker = new Worker(new URL('./app-fixture.mjs', import.meta.url), { workerData: { url, ...options } });
@@ -152,6 +152,21 @@ test('actual paste left-aligns terminal bullet items and keeps them aligned when
   await sender.until(s => s.rows.length === 1 && s.link.startsWith('http'));
   await sender.run('click', { label: 'Edit HANDOFF.md' });
   assert.equal((await sender.run('snapshot')).note, alignedTerminalBullets);
+});
+
+test('actual paste rebuilds a copied page from its HTML and keeps the result when editing the saved note', { timeout: 15000 }, async t => {
+  const sender = await page(t, await server(t));
+  await sender.run('paste', { text: pastedPageText, html: pastedPageHtml, enabled: false });
+  assert.equal((await sender.run('snapshot')).note, pastedPageText, 'Unchecked formatting uses the original paste');
+  const styledBullets = `<div style="white-space: pre"><span>${pastedTerminalBullets}</span></div>`;
+  await sender.run('paste', { text: pastedTerminalBullets, html: styledBullets });
+  assert.equal((await sender.run('snapshot')).note, alignedTerminalBullets, 'HTML without lists or tables keeps the text cleanup');
+  await sender.run('paste', { text: pastedPageText, html: pastedPageHtml });
+  assert.equal((await sender.run('snapshot')).note, pastedPageNote);
+  await sender.run('click', { element: 'add-note' });
+  await sender.until(s => s.rows.length === 1 && s.link.startsWith('http'));
+  await sender.run('click', { label: 'Edit HANDOFF.md' });
+  assert.equal((await sender.run('snapshot')).note, pastedPageNote);
 });
 
 test('actual composer removes files, edits/cancels notes and updates capacity', { timeout: 15000 }, async t => {
