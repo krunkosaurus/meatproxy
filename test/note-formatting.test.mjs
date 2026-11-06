@@ -4,21 +4,22 @@ import { parseHTML } from 'linkedom';
 import { fixNoteFormatting, noteFromHtml } from '../public/note-formatting.js';
 import { terminalTable, collapsedTerminalNote, restoredTerminalNote, pastedTerminalBullets, alignedTerminalBullets, pastedPageHtml, pastedPageText, pastedPageNote, copiedMarkdown, copiedMarkdownHtml, copiedMarkdownNote, record } from './note-formatting-fixture.mjs';
 
-const pasted = ` The best clue is the timing: Washington drops happen only from about 6 AM to 7 PM Pacific, and almost never
-  from 8 PM to 5 AM. Starlink congestion usually peaks in the evening, so this follows daytime activity
+// Made-up text in the layout of a reported Claude Code copy.
+const pasted = ` The best clue is the timing: nightly builds fail only from about 1 AM to 3 AM UTC, and almost never
+  from 9 AM to 6 PM. Cache traffic usually peaks during the day, so this follows the overnight backup
   instead.
 
   My suspects, in order:
-  1. Starlink itself in the daytime: short outages or local congestion. Mark's Starlink app keeps an outage
-     history. If it shows outages on Nov 4 between 8 and 10 AM PST, that settles it.
-  2. Mark's router losing track of connections when the house is busy. It's worse if traffic passes through
-     both the NETGEAR router and the Starlink router (Starlink not in bypass mode). Mark would know whether
+  1. The cache server itself overnight: short outages or a full disk. The cache dashboard keeps an outage
+     history. If it shows outages on Nov 4 between 1 and 2 AM UTC, that settles it.
+  2. The build agent losing track of connections when the backup is busy. It's worse if traffic passes through
+     both the office proxy and the VPN gateway (proxy not in bypass mode). The platform team would know whether
      it's set up that way.`;
-const expected = `The best clue is the timing: Washington drops happen only from about 6 AM to 7 PM Pacific, and almost never from 8 PM to 5 AM. Starlink congestion usually peaks in the evening, so this follows daytime activity instead.
+const expected = `The best clue is the timing: nightly builds fail only from about 1 AM to 3 AM UTC, and almost never from 9 AM to 6 PM. Cache traffic usually peaks during the day, so this follows the overnight backup instead.
 
 My suspects, in order:
-1. Starlink itself in the daytime: short outages or local congestion. Mark's Starlink app keeps an outage history. If it shows outages on Nov 4 between 8 and 10 AM PST, that settles it.
-2. Mark's router losing track of connections when the house is busy. It's worse if traffic passes through both the NETGEAR router and the Starlink router (Starlink not in bypass mode). Mark would know whether it's set up that way.`;
+1. The cache server itself overnight: short outages or a full disk. The cache dashboard keeps an outage history. If it shows outages on Nov 4 between 1 and 2 AM UTC, that settles it.
+2. The build agent losing track of connections when the backup is busy. It's worse if traffic passes through both the office proxy and the VPN gateway (proxy not in bypass mode). The platform team would know whether it's set up that way.`;
 test('unwraps the supplied Claude Code copy and keeps paragraphs and numbered items', () => {
   assert.equal(fixNoteFormatting(pasted), expected);
   assert.equal(fixNoteFormatting(expected), expected);
