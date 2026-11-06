@@ -78,15 +78,17 @@ The plan:
 Move the uploads first. Then remove the old disk.
 Set an alert at 80% full.`;
 
+// Each table row becomes one record, its lines joined by Markdown hard breaks.
+export const record = (...lines) => lines.join('  \n');
+const optionRecords = `${record('Option: Keep the current host', 'Assessment: Lowest effort, but the disk fills again within a month.')}
+
+${record('Option: Move uploads to object storage', 'Assessment: About $40 a month, and it removes the disk limit.')}`;
+
 export const pastedPageNote = `Summary: the upload failures came from a full disk, not the network.
 
 Here is how the options compare:
 
-Option: Keep the current host
-Assessment: Lowest effort, but the disk fills again within a month.
-
-Option: Move uploads to object storage
-Assessment: About $40 a month, and it removes the disk limit.
+${optionRecords}
 
 The deciding question.
 
@@ -104,3 +106,39 @@ The plan:
 
 1. Move the uploads first. Then remove the old disk.
 2. Set an alert at 80% full.`;
+
+// The same answer from the chat app's copy button: its own Markdown as
+// text/plain, beside HTML rendered from that Markdown.
+export const copiedMarkdown = `**Summary:** the upload failures came from a full disk, not the \`/var\` network share.
+
+Here is how the options compare:
+
+| Option | Assessment |
+|---|---|
+| Keep the current host | Lowest effort, but the disk fills again within a month. |
+| Move uploads to [object storage](https://example.com/storage) | About $40 a month, and it removes the disk limit. |
+
+**The deciding question.**
+
+> “We can’t lose another weekend of uploads.”
+
+The review raised two questions:
+
+- What happens when a transfer is interrupted.
+- Whether old files are *deleted* automatically.
+
+1. **Move the uploads first.** Then remove the old disk.
+2. **Set an alert** at 80% full.`;
+
+export const copiedMarkdownHtml = `<meta charset='utf-8'><html><head></head><body><p><strong><span>Summary:</span></strong><span> the upload failures came from a full disk, not the </span><code>/var</code><span> network share.</span></p>`
+  + `<p><span>Here is how the options compare:</span></p><div><div><div><table><thead><tr><th><span>Option</span></th><th><span>Assessment</span></th></tr></thead>`
+  + `<tbody><tr><td><span>Keep the current host</span></td><td><span>Lowest effort, but the disk fills again within a month.</span></td></tr>`
+  + `<tr><td><span>Move uploads to </span><a href="https://example.com/storage">object storage</a></td><td><span>About $40 a month, and it removes the disk limit.</span></td></tr></tbody></table></div></div></div>`
+  + `<p><strong><span>The deciding question.</span></strong></p><blockquote><p><span>“We can’t lose another weekend of uploads.”</span></p></blockquote>`
+  + `<p><span>The review raised two questions:</span></p><ul><li><span>What happens when a transfer is interrupted.</span></li><li><span>Whether old files are </span><em>deleted</em><span> automatically.</span></li></ul>`
+  + `<ol start="1"><li><strong><span>Move the uploads first.</span></strong><span> Then remove the old disk.</span></li><li><strong><span>Set an alert</span></strong><span> at 80% full.</span></li></ol></body></html>`;
+
+// The Markdown as written, with only its table turned into records.
+export const copiedMarkdownNote = copiedMarkdown.replace(/\| Option \|[^]*?disk limit\. \|/, `${record('Option: Keep the current host', 'Assessment: Lowest effort, but the disk fills again within a month.')}
+
+${record('Option: Move uploads to [object storage](https://example.com/storage)', 'Assessment: About $40 a month, and it removes the disk limit.')}`);

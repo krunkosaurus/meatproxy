@@ -13,7 +13,7 @@ import { connect as connectTCP } from 'node:net';
 import { WebSocketServer } from 'ws';
 import { createApp } from '../server.mjs';
 import { makeSecret, importSecret, encrypt, encodeJSON, toBase64 } from '../public/protocol.js';
-import { terminalTable, collapsedTerminalNote, restoredTerminalNote, pastedTerminalBullets, alignedTerminalBullets, pastedPageHtml, pastedPageText, pastedPageNote } from './note-formatting-fixture.mjs';
+import { terminalTable, collapsedTerminalNote, restoredTerminalNote, pastedTerminalBullets, alignedTerminalBullets, pastedPageHtml, pastedPageText, pastedPageNote, copiedMarkdown, copiedMarkdownHtml, copiedMarkdownNote } from './note-formatting-fixture.mjs';
 
 async function page(t, url, options = {}) {
   const worker = new Worker(new URL('./app-fixture.mjs', import.meta.url), { workerData: { url, ...options } });
@@ -167,6 +167,26 @@ test('actual paste rebuilds a copied page from its HTML and keeps the result whe
   await sender.until(s => s.rows.length === 1 && s.link.startsWith('http'));
   await sender.run('click', { label: 'Edit HANDOFF.md' });
   assert.equal((await sender.run('snapshot')).note, pastedPageNote);
+});
+
+test('actual paste keeps a copy button\'s Markdown, and its records survive being copied and pasted again', { timeout: 15000 }, async t => {
+  const sender = await page(t, await server(t));
+  await sender.run('paste', { text: copiedMarkdown, html: copiedMarkdownHtml });
+  assert.equal((await sender.run('snapshot')).note, copiedMarkdownNote);
+  await sender.run('paste', { text: copiedMarkdownNote, initial: copiedMarkdownNote, start: 0, end: copiedMarkdownNote.length });
+  assert.equal((await sender.run('snapshot')).note, copiedMarkdownNote, 'Moving converted text within the note leaves it as it is');
+  await sender.run('click', { element: 'add-note' });
+  const ready = await sender.until(s => s.rows.length === 1 && s.link.startsWith('http'));
+  const receiver = await page(t, ready.link);
+  await receiver.until(s => s.status === 'Sender online');
+  await receiver.run('click', { element: 'accept-files' });
+  await receiver.until(s => s.status === 'All files received');
+  await receiver.run('click', { element: 'copy-agent' });
+  const copied = (await receiver.run('snapshot')).clipboard;
+  assert.equal(copied, `# HANDOFF.md\n\n${copiedMarkdownNote}\n`);
+  const forward = await page(t, await server(t));
+  await forward.run('paste', { text: copied });
+  assert.equal((await forward.run('snapshot')).note, copied, 'Forwarding the copied notes keeps each record intact');
 });
 
 test('actual composer removes files, edits/cancels notes and updates capacity', { timeout: 15000 }, async t => {

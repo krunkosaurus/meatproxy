@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { parseHTML } from 'linkedom';
 import { fixNoteFormatting, noteFromHtml } from '../public/note-formatting.js';
-import { terminalTable, collapsedTerminalNote, restoredTerminalNote, pastedTerminalBullets, alignedTerminalBullets, pastedPageHtml, pastedPageText, pastedPageNote } from './note-formatting-fixture.mjs';
+import { terminalTable, collapsedTerminalNote, restoredTerminalNote, pastedTerminalBullets, alignedTerminalBullets, pastedPageHtml, pastedPageText, pastedPageNote, copiedMarkdown, copiedMarkdownHtml, copiedMarkdownNote, record } from './note-formatting-fixture.mjs';
 
 const pasted = ` The best clue is the timing: Washington drops happen only from about 6 AM to 7 PM Pacific, and almost never
   from 8 PM to 5 AM. Starlink congestion usually peaks in the evening, so this follows daytime activity
@@ -64,8 +64,8 @@ test('keeps fenced code contents, including blank lines and shorter nested fence
   assert.equal(fixNoteFormatting('Intro\n  - Item\n\n    ```js\n    const value = {\n      nested: true,\n    };\n    ```'), 'Intro\n- Item\n\n  ```js\n  const value = {\n    nested: true,\n  };\n  ```');
 });
 
-test('keeps indented code, headings, tables, quotes and Markdown hard breaks', () => {
-  const markdown = '# Heading\n\n    const value = {\n      nested: true,\n    };\n\n| Name | Value |\n| --- | --- |\n| a | b |\n\n> Quoted line\n> Another line\n\nFirst line  \nSecond line\\\nThird line\n\n---\n\nTitle\n=====';
+test('keeps indented code, headings, quotes and Markdown hard breaks', () => {
+  const markdown = '# Heading\n\n    const value = {\n      nested: true,\n    };\n\n> Quoted line\n> Another line\n\nFirst line  \nSecond line\\\nThird line\n\n---\n\nTitle\n=====';
   assert.equal(fixNoteFormatting(markdown), markdown);
   assert.equal(fixNoteFormatting('\tcode\n\tmore code'), '\tcode\n\tmore code');
   assert.equal(fixNoteFormatting('- List item\n# Heading\n    code\n    more code'), '- List item\n# Heading\n    code\n    more code');
@@ -125,7 +125,30 @@ test('keeps headings, nested lists, list numbering, line breaks and code from co
 });
 
 test('labels table cells by column, including blank headers, one-row and nested tables', () => {
-  assert.equal(noteFromHtml(body('<table><tr><th></th><th>Cost</th></tr><tr><td>August</td><td>$2,500.00</td></tr><tr><td>September</td><td></td></tr></table>')), 'August\nCost: $2,500.00\n\nSeptember');
-  assert.equal(noteFromHtml(body('<table><tr><td>Only</td><td>row</td></tr></table>')), 'Only\nrow');
-  assert.equal(noteFromHtml(body('<table><tr><th>Name</th><th>Detail</th></tr><tr><td>A</td><td><table><tr><td>x</td><td>y</td></tr></table></td></tr></table>')), 'Name: A\nDetail: x y');
+  assert.equal(noteFromHtml(body('<table><tr><th></th><th>Cost</th></tr><tr><td>August</td><td>$2,500.00</td></tr><tr><td>September</td><td></td></tr></table>')), 'August  \nCost: $2,500.00\n\nSeptember');
+  assert.equal(noteFromHtml(body('<table><tr><td>Only</td><td>row</td></tr></table>')), 'Only  \nrow');
+  assert.equal(noteFromHtml(body('<table><tr><th>Name</th><th>Detail</th></tr><tr><td>A</td><td><table><tr><td>x</td><td>y</td></tr></table></td></tr></table>')), 'Name: A  \nDetail: x y');
+});
+
+test('keeps a copy button\'s own Markdown and turns only its table into records', () => {
+  assert.equal(noteFromHtml(body(copiedMarkdownHtml), copiedMarkdown), null);
+  assert.equal(noteFromHtml(body(copiedMarkdownHtml), copiedMarkdown.replaceAll('\n', '\r\n')), null);
+  assert.equal(fixNoteFormatting(copiedMarkdown), copiedMarkdownNote);
+  // A browser selection's text has no Markdown for its rows and items, so the HTML is rebuilt.
+  assert.equal(noteFromHtml(body(pastedPageHtml), pastedPageText), pastedPageNote);
+  for (const partial of [copiedMarkdown.replace('- Whether', 'Whether'), copiedMarkdown.replace('|---|---|\n', '')]) {
+    assert.notEqual(noteFromHtml(body(copiedMarkdownHtml), partial), null);
+  }
+  // Moving converted text within a note pastes it again.
+  for (const note of [pastedPageNote, copiedMarkdownNote]) assert.equal(fixNoteFormatting(note), note);
+});
+
+test('turns Markdown tables into records without touching code, wrapped or malformed tables', () => {
+  const table = '| Name | Cost |\n| :--- | ---: |\n| a \\| b | $1 |\n|  | $2 |';
+  assert.equal(fixNoteFormatting(`Before\n\n${table}\n\nAfter`), `Before\n\n${record('Name: a | b', 'Cost: $1')}\n\nCost: $2\n\nAfter`);
+  assert.equal(fixNoteFormatting(`- Item\n\n  ${table.replaceAll('\n', '\n  ')}`), `- Item\n\n  ${record('Name: a | b', 'Cost: $1').replace('\n', '\n  ')}\n\n  Cost: $2`);
+  const wrapped = '| Name | Cost |\n|---|---|\n| a long cell that the terminal\nwrapped | $1 |';
+  for (const kept of ['```\n' + table + '\n```', table.replace(/^/gm, '    '), wrapped, '| A | B |\n|---|\n| 1 | 2 |']) {
+    assert.equal(fixNoteFormatting(kept), kept);
+  }
 });
