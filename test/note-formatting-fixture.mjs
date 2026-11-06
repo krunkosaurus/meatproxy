@@ -38,3 +38,69 @@ export const alignedTerminalBullets = `• The overall results look reassuring.
 • SSD: The storage reports healthy.
 
 • Graphics: One cooling problem needs attention.`;
+
+// A chat answer copied from a browser, with the reported markup and its
+// text/plain alternative: tab-separated cells and bare list lines.
+export const pastedPageHtml = `<meta charset='utf-8'><p class="Paragraph" dir="auto" style="margin: 0px 0px 4px; font-weight: 400;"><strong class="font-semibold"><span><br class="Apple-interchange-newline">Summary:</span></strong><span> the upload failures came from a full disk, not the network.</span></p>`
+  + `<p dir="auto"><span>Here is how the options compare:</span></p>`
+  + `<div class="TableWrapper"><div><div><table dir="auto"><thead><tr><th data-col-size="md"><span>Option</span></th><th data-col-size="xl"><span>Assessment</span></th></tr></thead>`
+  + `<tbody><tr><td><span>Keep the current host</span></td><td><span>Lowest effort, but the disk fills again within a month.</span></td></tr>`
+  + `<tr><td><span>Move uploads to object storage</span></td><td><span>About $40 a month, and it removes the disk limit.</span></td></tr></tbody></table></div></div>`
+  + `<div data-block-actions="true" data-markdown-copy="exclude"><button type="button" aria-label="Copy table"><span aria-hidden="true"></span></button><button type="button" aria-label="Expand table"><span aria-hidden="true"></span></button></div></div>`
+  + `<p dir="auto"><strong><span>The deciding question.</span></strong></p><p dir="auto"><span>Which costs more: an outage or the storage bill?</span></p>`
+  + `<blockquote><p dir="auto"><span>“We can’t lose another weekend of uploads.”</span></p></blockquote>`
+  + `<p dir="auto"><span>The review raised three questions:</span></p><ul dir="auto"><li><span>What happens when a transfer is interrupted.</span></li>`
+  + `<li><span>Whether old files are deleted automatically.</span></li><li><span>Who receives the alert when the disk is nearly full.</span></li></ul>`
+  + `<p dir="auto"><span>The plan:</span></p><ol dir="auto" start="1"><li><strong><span>Move the uploads first.</span></strong><span> Then remove the old disk.</span></li>`
+  + `<li><strong><span>Set an alert</span></strong><span> at 80% full.</span></li></ol>`;
+
+export const pastedPageText = `
+Summary: the upload failures came from a full disk, not the network.
+
+Here is how the options compare:
+
+Option\tAssessment
+Keep the current host\tLowest effort, but the disk fills again within a month.
+Move uploads to object storage\tAbout $40 a month, and it removes the disk limit.
+The deciding question.
+
+Which costs more: an outage or the storage bill?
+
+“We can’t lose another weekend of uploads.”
+
+The review raised three questions:
+
+What happens when a transfer is interrupted.
+Whether old files are deleted automatically.
+Who receives the alert when the disk is nearly full.
+The plan:
+
+Move the uploads first. Then remove the old disk.
+Set an alert at 80% full.`;
+
+export const pastedPageNote = `Summary: the upload failures came from a full disk, not the network.
+
+Here is how the options compare:
+
+Option: Keep the current host
+Assessment: Lowest effort, but the disk fills again within a month.
+
+Option: Move uploads to object storage
+Assessment: About $40 a month, and it removes the disk limit.
+
+The deciding question.
+
+Which costs more: an outage or the storage bill?
+
+> “We can’t lose another weekend of uploads.”
+
+The review raised three questions:
+
+- What happens when a transfer is interrupted.
+- Whether old files are deleted automatically.
+- Who receives the alert when the disk is nearly full.
+
+The plan:
+
+1. Move the uploads first. Then remove the old disk.
+2. Set an alert at 80% full.`;
