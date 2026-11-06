@@ -610,7 +610,7 @@ $('note').addEventListener('paste', event => {
   const text = event.clipboardData.getData('text/plain');
   const html = event.clipboardData.getData('text/html');
   // DOMParser documents are inert: copied scripts and images never run or load.
-  const cleaned = (html && noteFromHtml(new DOMParser().parseFromString(html, 'text/html').body)) || fixNoteFormatting(text);
+  const cleaned = (html && noteFromHtml(new DOMParser().parseFromString(html, 'text/html').body, text)) || fixNoteFormatting(text);
   if (cleaned === text) return;
   const note = $('note');
   const available = note.maxLength - (note.value.length - (note.selectionEnd - note.selectionStart));

@@ -54,8 +54,8 @@ export function fixNoteFormatting(text) {
 
   const result = [];
   let fence = null, listIndent = 0, listMargin = null, join = false;
-  for (const line of lines) {
-    const trimmed = line.trim();
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index], trimmed = line.trim();
     const indent = indentation(line);
     const marker = line.match(listMarker);
     const opening = trimmed.match(/^(`{3,}|~{3,})/);
@@ -90,6 +90,13 @@ export function fixNoteFormatting(text) {
       result.push(...table.map(row => listMargin === null ? row : row.slice(Math.min(listMargin, indent)))); join = false;
       continue;
     }
+    const pipes = code ? null : pipeTable(lines, index);
+    if (pipes) {
+      const margin = formatted.match(/^\s*/)[0];
+      records(pipes.rows).forEach((record, number) => result.push(...(number ? [''] : []), ...record.split('\n').map(row => margin + row)));
+      index += pipes.length - 1; join = false;
+      continue;
+    }
     if (block || code) {
       result.push(formatted); join = false;
       continue;
@@ -105,13 +112,43 @@ export function fixNoteFormatting(text) {
   return result.join('\n');
 }
 
+const pipeRow = /^\|.*\|$/;
+const delimiterRow = /^\|(?:[ \t]*:?-+:?[ \t]*\|)+$/;
+const cellsOf = row => row.slice(1, -1).replace(/\\\|/g, '\0').split('|').map(cell => cell.replaceAll('\0', '|').trim());
+
+// A Markdown table, as a chat app's copy button writes it. A row a terminal
+// wrapped no longer begins and ends with a pipe, so that table is left as it is.
+function pipeTable(lines, start) {
+  const header = lines[start].trim(), delimiter = lines[start + 1]?.trim() ?? '';
+  if (!pipeRow.test(header) || !delimiterRow.test(delimiter) || cellsOf(header).length !== cellsOf(delimiter).length) return null;
+  let end = start + 2;
+  while (end < lines.length && lines[end].includes('|')) end++;
+  const rows = lines.slice(start, end).map(line => line.trim());
+  if (!rows.every(row => pipeRow.test(row))) return null;
+  return { length: end - start, rows: [header, ...rows.slice(2)].map(cellsOf) };
+}
+
+// Wide cells wrap unreadably in a text table, so each row repeats its column names.
+// Hard breaks keep a row's lines apart when Markdown renders or a paste unwraps them.
+function records([header = [], ...body]) {
+  const labels = body.length ? header : [];
+  return (body.length ? body : [header])
+    .map(cells => cells.map((cell, index) => cell && (labels[index] ? `${labels[index]}: ${cell}` : cell)).filter(Boolean).join('  \n'))
+    .filter(Boolean);
+}
+
 const skippedTags = new Set(['button', 'script', 'style']);
 const blockTags = new Set(['article', 'aside', 'dd', 'details', 'div', 'dl', 'dt', 'figcaption', 'figure', 'footer', 'header', 'li', 'main', 'nav', 'p', 'section', 'summary']);
 
 // Browsers copy a page's list items and table cells onto bare adjacent lines in
 // text/plain, which unwrapping would join. Their HTML still has the structure.
-export function noteFromHtml(root) {
-  if (!root.querySelector('table, ul, ol')) return null;
+export function noteFromHtml(root, text = '') {
+  const tables = root.querySelectorAll('table').length, items = root.querySelectorAll('li').length;
+  if (!tables && !items) return null;
+  // A copy button's text/plain is the answer's own Markdown, with the emphasis,
+  // code and links this rebuild drops. Keep it when it has every table and item.
+  const lines = text.split('\n').map(line => line.trim());
+  if (lines.filter(line => delimiterRow.test(line)).length >= tables && lines.filter(line => listMarker.test(line)).length >= items) return null;
   return blocksOf(root.childNodes).join('\n\n');
 }
 
@@ -146,7 +183,7 @@ function convertBlock(node) {
   const tag = node.localName, heading = tag.match(/^h([1-6])$/);
   if (heading) { const text = flatten(node); return text ? [`${'#'.repeat(Number(heading[1]))} ${text}`] : []; }
   if (tag === 'ul' || tag === 'ol') return listBlocks(node, tag === 'ol');
-  if (tag === 'table') return tableRecords(node);
+  if (tag === 'table') return records(tableRows(node));
   if (tag === 'blockquote') {
     const text = blocksOf(node.childNodes).join('\n\n');
     return text ? [text.split('\n').map(line => line ? `> ${line}` : '>').join('\n')] : [];
@@ -173,13 +210,5 @@ function listBlocks(list, ordered) {
   return items.length ? [items.join('\n')] : [];
 }
 
-// Wide cells wrap unreadably in a text table, so each row repeats its column names.
-function tableRecords(table) {
-  const rows = [...table.querySelectorAll('tr')].filter(row => row.closest('table') === table)
-    .map(row => [...row.children].filter(cell => cell.localName === 'td' || cell.localName === 'th').map(flatten));
-  const [header = [], ...body] = rows;
-  const labels = body.length ? header : [];
-  return (body.length ? body : [header])
-    .map(cells => cells.map((cell, index) => cell && (labels[index] ? `${labels[index]}: ${cell}` : cell)).filter(Boolean).join('\n'))
-    .filter(Boolean);
-}
+const tableRows = table => [...table.querySelectorAll('tr')].filter(row => row.closest('table') === table)
+  .map(row => [...row.children].filter(cell => cell.localName === 'td' || cell.localName === 'th').map(flatten));
