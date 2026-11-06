@@ -63,6 +63,7 @@ parentPort.on('message', async ({ id, command, ...args }) => {
         buttons: [...row.querySelectorAll('button')].map(button => ({ label: button.getAttribute('aria-label'), disabled: button.disabled })),
       })),
       note: $('note').value, editing: !$('cancel-note').hidden, clipboard, finishing,
+      tab: document.querySelector('[role="tab"][aria-selected="true"]').id, filesPanel: !$('files-panel').hidden, notePanel: !$('note-panel').hidden,
     };
     else if (command === 'advance') skew += args.ms;
     else if (command === 'stall') { // The tab freezes without closing; its messages leave when it resumes.
@@ -94,6 +95,10 @@ parentPort.on('message', async ({ id, command, ...args }) => {
       event.clipboardData = { getData: type => type === 'text/html' ? args.html ?? '' : args.text };
       note.dispatchEvent(event);
       if (!event.defaultPrevented) note.setRangeText(args.text, note.selectionStart, note.selectionEnd);
+    } else if (command === 'drag') {
+      const event = new DOMEvent('dragenter', { bubbles: true, cancelable: true });
+      event.dataTransfer = { types: args.types };
+      $('note').dispatchEvent(event);
     } else if (command === 'note') { $('note').value = args.text; await $('add-note').onclick(); }
     else if (command === 'click') {
       const element = args.element ? $(args.element) : [...document.querySelectorAll('button,a')].find(button => button.getAttribute('aria-label') === args.label);

@@ -49,17 +49,17 @@
         <div class="card-top"><span class="step" id="content-step" aria-hidden="true">1</span><h2 id="content-title">Add files or a note</h2></div>
         <div id="sender-controls">
           <div class="tabs" role="tablist" aria-label="What to send">
-            <button id="files-tab" role="tab" aria-selected="true" aria-controls="files-panel">Files</button>
-            <button id="note-tab" role="tab" aria-selected="false" aria-controls="note-panel" tabindex="-1">Note</button>
+            <button id="files-tab" role="tab" aria-selected="false" aria-controls="files-panel" tabindex="-1">Files</button>
+            <button id="note-tab" role="tab" aria-selected="true" aria-controls="note-panel">Note</button>
           </div>
-          <div id="files-panel" role="tabpanel" aria-labelledby="files-tab">
+          <div id="files-panel" role="tabpanel" aria-labelledby="files-tab" hidden>
             <button class="dropzone" id="dropzone" type="button" aria-label="Choose files">
               <svg viewBox="0 0 40 40" aria-hidden="true"><path d="M20 27V7m-7 7 7-7 7 7M9 26v7h22v-7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
               <strong id="dropzone-label">Choose files</strong><span>or drop them here</span>
             </button>
             <input id="file-input" type="file" multiple hidden>
           </div>
-          <div id="note-panel" role="tabpanel" aria-labelledby="note-tab" hidden>
+          <div id="note-panel" role="tabpanel" aria-labelledby="note-tab">
             <label for="note" class="sr-only">Your note</label>
             <textarea id="note" placeholder="A message, a brief, instructions for an agent…" maxlength="200000" rows="4"></textarea>
             <label class="preview-option" for="fix-formatting"><input id="fix-formatting" type="checkbox" checked aria-describedby="formatting-help"> Fix formatting</label>
