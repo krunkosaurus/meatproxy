@@ -603,6 +603,8 @@ $('file-input').onchange = event => { addFiles([...event.target.files]); event.t
 for (const name of ['dragenter', 'dragover']) $('dropzone').addEventListener(name, event => { event.preventDefault(); $('dropzone').classList.add('dragging'); });
 for (const name of ['dragleave', 'drop']) $('dropzone').addEventListener(name, event => { event.preventDefault(); $('dropzone').classList.remove('dragging'); });
 $('dropzone').ondrop = event => addFiles([...event.dataTransfer.files]);
+// The page opens on the Note tab, so files dragged in reveal the drop area.
+document.addEventListener('dragenter', event => { if (event.dataTransfer?.types.includes('Files')) selectInputTab($('files-tab')); });
 window.addEventListener('dragover', event => event.preventDefault());
 window.addEventListener('drop', event => event.preventDefault());
 $('note').addEventListener('paste', event => {

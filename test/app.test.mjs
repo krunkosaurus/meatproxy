@@ -189,6 +189,18 @@ test('actual paste keeps a copy button\'s Markdown, and its records survive bein
   assert.equal((await forward.run('snapshot')).note, copied, 'Forwarding the copied notes keeps each record intact');
 });
 
+test('the page opens on the Note tab, and dragging files in shows the Files drop area', { timeout: 15000 }, async t => {
+  const sender = await page(t, await server(t));
+  let state = await sender.run('snapshot');
+  assert.deepEqual([state.tab, state.notePanel, state.filesPanel], ['note-tab', true, false]);
+  await sender.run('drag', { types: ['text/plain'] });
+  state = await sender.run('snapshot');
+  assert.equal(state.tab, 'note-tab', 'Dragging text keeps the note editor open');
+  await sender.run('drag', { types: ['Files'] });
+  state = await sender.run('snapshot');
+  assert.deepEqual([state.tab, state.notePanel, state.filesPanel], ['files-tab', false, true]);
+});
+
 test('actual composer removes files, edits/cancels notes and updates capacity', { timeout: 15000 }, async t => {
   const sender = await page(t, await server(t));
   await sender.run('note', { text: 'Original note' });
