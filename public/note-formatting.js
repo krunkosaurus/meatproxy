@@ -2,6 +2,8 @@ const listMarker = /^[ \t]*(?:[-+*•]|\d+[.)])[ \t]+/;
 const terminalBullet = /^ {0,3}•[ \t]+/;
 const blockLine = /^(?:#{1,6}(?:\s|$)|>|\||.*\|\s*$|(?:[-*_]\s*){3,}$|[=-]+\s*$)/;
 const boxLine = /^(?:[┌├└][─┬┼┴]+[┐┤┘]|│.*│)$/;
+// Claude Code draws a Markdown quote with this bar on every wrapped line.
+const quoteBar = /^[ \t]*▎ ?/;
 const indentation = line => line.match(/^ */)[0].length;
 
 // Some terminal clipboards replace a table's row breaks with spaces. Its top
@@ -86,6 +88,15 @@ export function fixNoteFormatting(text) {
       continue;
     }
     const code = !marker && (/^\t/.test(line) || indent >= listIndent + 4);
+    if (!code && quoteBar.test(line)) {
+      let end = index;
+      while (end < lines.length && quoteBar.test(lines[end])) end++;
+      const margin = formatted.match(/^\s*/)[0];
+      const quote = fixNoteFormatting(lines.slice(index, end).map(row => row.replace(quoteBar, '')).join('\n'));
+      result.push(...quote.split('\n').map(row => margin + (row ? `> ${row}` : '>')));
+      index = end - 1; join = false;
+      continue;
+    }
     if (table && !code) {
       result.push(...table.map(row => listMargin === null ? row : row.slice(Math.min(listMargin, indent)))); join = false;
       continue;

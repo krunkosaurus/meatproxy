@@ -61,7 +61,7 @@ Handoff for the review agent: the login redirect bug is fixed and ready for a se
 Run the e2e suite on staging before merging.
 ```
 
-Wrapped lines are joined back together and the terminal's margin is gone. Paragraphs, lists, code blocks and terminal tables are kept as they are. Text copied from a web page or chat app, by selecting it or with its copy button, keeps its lists and quotes, and each table row becomes its own block that repeats the column names, so wide cells stay readable. It is on by default; untick **Fix formatting** to paste text exactly as you copied it.
+Wrapped lines are joined back together and the terminal's margin is gone. Paragraphs, lists, quotes, code blocks and terminal tables are kept as they are. Text copied from a web page or chat app, by selecting it or with its copy button, keeps its lists and quotes, and each table row becomes its own block that repeats the column names, so wide cells stay readable. It is on by default; untick **Fix formatting** to paste text exactly as you copied it.
 
 ## Send to an agent
 
