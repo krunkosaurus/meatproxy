@@ -32,6 +32,24 @@ test('removes top-level list margins even when surrounding paragraphs have no in
   assert.equal(fixNoteFormatting(intro + indentedItems), intro + expected);
 });
 
+test('turns a Claude Code quote bar into an unwrapped Markdown quote', () => {
+  const quoted = ` Here's a reply you could send to Dana:
+
+  ▎ I don't think that's it. The first charge (Mar 2, 00:34 UTC) is on batch 4 where you put it, and Mar 9's
+  ▎ 06:34 charge is on batch 5. Batch 5 has seven lines and none for Mar 4. Can you add the Mar 4 one
+  ▎ to batch 6?
+
+  The transfer is still waiting on the review screen. If Dana would rather reissue batch 5 for $4,000
+  before you click Submit, tell me and I'll change the amount.`;
+  const expected = `Here's a reply you could send to Dana:
+
+> I don't think that's it. The first charge (Mar 2, 00:34 UTC) is on batch 4 where you put it, and Mar 9's 06:34 charge is on batch 5. Batch 5 has seven lines and none for Mar 4. Can you add the Mar 4 one to batch 6?
+
+The transfer is still waiting on the review screen. If Dana would rather reissue batch 5 for $4,000 before you click Submit, tell me and I'll change the amount.`;
+  assert.equal(fixNoteFormatting(quoted), expected);
+  assert.equal(fixNoteFormatting(expected), expected);
+});
+
 test('preserves nested lists while unwrapping their continuation lines', () => {
   assert.equal(fixNoteFormatting('  - Parent item\n    continued\n    - Child item\n      continued\n  - Next item'), '- Parent item continued\n  - Child item continued\n- Next item');
   assert.equal(fixNoteFormatting('- Parent\n  - Child'), '- Parent\n  - Child');
