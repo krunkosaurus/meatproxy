@@ -50,6 +50,44 @@ The transfer is still waiting on the review screen. If Dana would rather reissue
   assert.equal(fixNoteFormatting(expected), expected);
 });
 
+test('removes the five-column margin of a Hermes answer and unwraps its lines', () => {
+  // Made-up text in the layout of a reported Hermes copy, selected from its first letter.
+  const answer = `Quick note: the Tuesday supplier call moved to Thursday at 10 AM, and the room changed too. Please bring
+     the printed order sheets with you:
+
+     • Orchard Lane: the March delivery list with the missing crate counts filled in, plus the signed
+     receipt from the driver
+     • Mill Road: the two late invoices and the credit note that cancels the first one, so we can settle
+     both at once
+     • Harbor Street: nothing new
+
+     The call is 30 minutes. Each shop gets five minutes, then we agree the April order together. Nobody
+     places an order before the call ends.
+
+     Notes:
+     • The agenda leaves out prices on purpose. Two suppliers join the call, and they should not see each
+     other's quotes.
+     • If you can't make it, send your sheets to Priya and she will read them out.`;
+  const expected = `Quick note: the Tuesday supplier call moved to Thursday at 10 AM, and the room changed too. Please bring the printed order sheets with you:
+
+• Orchard Lane: the March delivery list with the missing crate counts filled in, plus the signed receipt from the driver
+• Mill Road: the two late invoices and the credit note that cancels the first one, so we can settle both at once
+• Harbor Street: nothing new
+
+The call is 30 minutes. Each shop gets five minutes, then we agree the April order together. Nobody places an order before the call ends.
+
+Notes:
+• The agenda leaves out prices on purpose. Two suppliers join the call, and they should not see each other's quotes.
+• If you can't make it, send your sheets to Priya and she will read them out.`;
+  assert.equal(fixNoteFormatting(answer), expected);
+  // A selection that starts at the left edge of the terminal has the margin on its first line too.
+  assert.equal(fixNoteFormatting('     ' + answer), expected);
+  assert.equal(fixNoteFormatting('Done.\n\n     The next step\n     comes later.'), 'Done.\n\nThe next step comes later.');
+  assert.equal(fixNoteFormatting(expected), expected);
+  // Code indented by four spaces, or by six under a list item, is still code.
+  for (const code of ['Run this:\n\n    npm ci\n    npm test', '      const a = 1;\n      const b = 2;']) assert.equal(fixNoteFormatting(code), code);
+});
+
 test('preserves nested lists while unwrapping their continuation lines', () => {
   assert.equal(fixNoteFormatting('  - Parent item\n    continued\n    - Child item\n      continued\n  - Next item'), '- Parent item continued\n  - Child item continued\n- Next item');
   assert.equal(fixNoteFormatting('- Parent\n  - Child'), '- Parent\n  - Child');
