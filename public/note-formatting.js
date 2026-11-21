@@ -51,8 +51,9 @@ export function fixNoteFormatting(text) {
   const marginLines = content.length > 1 && !listMarker.test(first) && !blockLine.test(first) && !/^(`{3,}|~{3,})/.test(first)
     ? content.slice(1) : content;
   const margin = marginLines.reduce((min, line) => Math.min(min, indentation(line)), Infinity);
-  // Four spaces may be an intentional Markdown code block.
-  if (margin > 0 && margin < 4) lines = lines.map(line => line.slice(Math.min(margin, indentation(line))));
+  // Four spaces or more may be an intentional Markdown code block. Five is the
+  // margin Hermes draws around an answer: a border column and four of padding.
+  if (margin > 0 && (margin < 4 || margin === 5)) lines = lines.map(line => line.slice(Math.min(margin, indentation(line))));
 
   const result = [];
   let fence = null, listIndent = 0, listMargin = null, join = false;
