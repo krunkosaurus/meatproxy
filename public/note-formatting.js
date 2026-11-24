@@ -1,10 +1,76 @@
 const listMarker = /^[ \t]*(?:[-+*•]|\d+[.)])[ \t]+/;
 const terminalBullet = /^ {0,3}•[ \t]+/;
 const blockLine = /^(?:#{1,6}(?:\s|$)|>|\||.*\|\s*$|(?:[-*_]\s*){3,}$|[=-]+\s*$)/;
-const boxLine = /^(?:[┌├└][─┬┼┴]+[┐┤┘]|│.*│)$/;
+const boxLine = /^(?:[┌├└╭╰][─┬┼┴]+[┐┤┘╮╯]|│(?:.*│)?|(?:│[ \t]*)*[├└]─.*)$/;
 // Claude Code draws a Markdown quote with this bar on every wrapped line.
 const quoteBar = /^[ \t]*▎ ?/;
+// Antigravity (agy) draws a light vertical rail down the left of a block.
+const railBar = /^ {0,3}│(?: |$)/;
+const railPrefix = /^ {0,3}│ ?/;
+const hyphenWrap = /[\p{L}\p{N}]-$/u;
+const suspendedHyphen = /^(?:and|or|nor|to)(?:\s|$)/i;
 const indentation = line => line.match(/^ */)[0].length;
+const joinWrapped = (before, after) =>
+  hyphenWrap.test(before) && /^[\p{L}\p{N}]/u.test(after) && !suspendedHyphen.test(after)
+    ? before + after : `${before} ${after}`;
+
+// Strip Antigravity's left │ rail while leaving box tables, directory trees and
+// fenced or indented code alone. A wrapped word that spills past the rail onto
+// the next line without its own │ is joined back onto the line above it.
+function stripRails(lines) {
+  const out = [];
+  let fence = null;
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index], trimmed = line.trim();
+    if (fence) {
+      out.push(line);
+      if (new RegExp(`^${fence[0]}{${fence.length},}\\s*$`).test(trimmed)) fence = null;
+      continue;
+    }
+    const opening = trimmed.match(/^(`{3,}|~{3,})/);
+    if (opening) {
+      fence = opening[0]; out.push(line);
+      continue;
+    }
+    if (!railBar.test(line)) { out.push(line); continue; }
+    const railIndent = indentation(line);
+    const isRail = row => railBar.test(row) && indentation(row) === railIndent;
+    let end = index, hasProse = false;
+    const items = [];
+    while (end < lines.length) {
+      if (isRail(lines[end])) {
+        const row = lines[end], text = row.replace(railPrefix, '');
+        if (text.trim() && !boxLine.test(row.trim())) hasProse = true;
+        items.push({ kind: 'rail', text });
+        end++;
+        continue;
+      }
+      const prev = items[items.length - 1];
+      if (!prev || prev.kind !== 'rail' || !prev.text.trim()) break;
+      let look = end;
+      while (look < lines.length && lines[look].trim() && indentation(lines[look]) <= railIndent
+        && !isRail(lines[look]) && !/^(?:[┌├└]|`{3,}|~{3,})/.test(lines[look].trim())) look++;
+      if (look === end || look >= lines.length || !isRail(lines[look])) break;
+      for (let k = end; k < look; k++) items.push({ kind: 'overflow', text: lines[k].trim() });
+      end = look;
+    }
+    if (!hasProse) {
+      for (let k = index; k < end; k++) out.push(lines[k]);
+      index = end - 1;
+      continue;
+    }
+    const stripped = [];
+    for (const item of items) {
+      if (item.kind === 'overflow') stripped[stripped.length - 1] = joinWrapped(stripped[stripped.length - 1].trimEnd(), item.text);
+      else stripped.push(item.text.trim() ? item.text : '');
+    }
+    if (index === 0 || !lines[index - 1].trim()) while (stripped.length && !stripped[0]) stripped.shift();
+    if (end === lines.length || !lines[end].trim()) while (stripped.length && !stripped[stripped.length - 1]) stripped.pop();
+    out.push(...stripped);
+    index = end - 1;
+  }
+  return out;
+}
 
 // Some terminal clipboards replace a table's row breaks with spaces. Its top
 // border supplies the cell count, including rows with no separator between them.
@@ -39,7 +105,11 @@ export function fixNoteFormatting(text) {
   if (!/[\r\n]/.test(text)) {
     if (/^(?: {4}| *\t)/.test(text)) return text;
     const table = restoreBoxTable(text);
-    if (!table) return terminalBullet.test(text) ? text.trimStart() : text;
+    if (!table) {
+      const stripped = railBar.test(text) && !boxLine.test(text.trim()) ? text.replace(railPrefix, '') : '';
+      const line = stripped.trim() ? stripped : text;
+      return terminalBullet.test(line) ? line.trimStart() : line;
+    }
     text = table.join('\n');
   }
   let lines = text.replace(/\r\n?/g, '\n').split('\n');
@@ -54,6 +124,7 @@ export function fixNoteFormatting(text) {
   // Four spaces or more may be an intentional Markdown code block. Five is the
   // margin Hermes draws around an answer: a border column and four of padding.
   if (margin > 0 && (margin < 4 || margin === 5)) lines = lines.map(line => line.slice(Math.min(margin, indentation(line))));
+  lines = stripRails(lines);
 
   const result = [];
   let fence = null, listIndent = 0, listMargin = null, join = false;
@@ -117,7 +188,7 @@ export function fixNoteFormatting(text) {
     const value = hardBreak ? line.trimStart() : trimmed;
     if (marker) {
       result.push(hardBreak ? formatted : formatted.trimEnd()); listIndent = marker[0].length;
-    } else if (join) result[result.length - 1] += ` ${value}`;
+    } else if (join) result[result.length - 1] = joinWrapped(result[result.length - 1], value);
     else result.push(listMargin !== null ? (hardBreak ? formatted : formatted.trimEnd()) : value);
     join = !hardBreak;
   }

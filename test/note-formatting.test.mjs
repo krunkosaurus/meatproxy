@@ -88,6 +88,83 @@ Notes:
   for (const code of ['Run this:\n\n    npm ci\n    npm test', '      const a = 1;\n      const b = 2;']) assert.equal(fixNoteFormatting(code), code);
 });
 
+test('strips Antigravity (agy) │ rails, bridges wrapped overflow words and keeps nested bullets', () => {
+  // Made-up text in the layout of a reported Antigravity (agy) copy.
+  const agy = `  │ Hi Marta (north-dock),
+  │
+  │ Sorry for the delay on this order. We checked the gate, yard, scale, and carrier logs for shipment
+  │ #99481203 (pallet batch A4-7710). Below is everything we found so you have a full record for the claim.
+  │
+  │ Summary of What Happened
+  │
+  │ 1. The trailer seal had already been broken before Tuesday. Yard camera logs show the doors were first
+  │ opened at the transfer hub on March 18, 2026 at 10:41 UTC (two crates missing), and again on March 20.
+  │ 2. Second stop before the lock change: An unmarked van entered the south bay on October 30, 2026 and
+  │ returned on November 15, 2026 at 11:10 UTC — before the keypad code was rotated.
+  │ 3. The missing load after the gate opened: Right after the Monday release unlocked on November 16,
+  2026
+  │ at 00:00 UTC, the backup badge cleared dock 4 at 00:01 UTC and signed out 140 cartons at 00:02 UTC.
+  │ 4. Why the new badge rule didn't stop it:
+  │     • Our logs confirm the new badge rule took effect on November 16, 2026 at 07:40 UTC — seven hours
+  │     after the transfer and dock sign-off
+  had
+  │     already finished.
+  │     • Also, turning on the rule did not immediately expire already-
+  │     issued gate passes (we have since fixed this), so the older pass kept working through November 19.
+  │     • Most importantly, anyone holding the printed backup code could open the side locker without a
+  │     badge check.
+  │`;
+  const expected = `Hi Marta (north-dock),
+
+Sorry for the delay on this order. We checked the gate, yard, scale, and carrier logs for shipment #99481203 (pallet batch A4-7710). Below is everything we found so you have a full record for the claim.
+
+Summary of What Happened
+
+1. The trailer seal had already been broken before Tuesday. Yard camera logs show the doors were first opened at the transfer hub on March 18, 2026 at 10:41 UTC (two crates missing), and again on March 20.
+2. Second stop before the lock change: An unmarked van entered the south bay on October 30, 2026 and returned on November 15, 2026 at 11:10 UTC — before the keypad code was rotated.
+3. The missing load after the gate opened: Right after the Monday release unlocked on November 16, 2026 at 00:00 UTC, the backup badge cleared dock 4 at 00:01 UTC and signed out 140 cartons at 00:02 UTC.
+4. Why the new badge rule didn't stop it:
+    • Our logs confirm the new badge rule took effect on November 16, 2026 at 07:40 UTC — seven hours after the transfer and dock sign-off had already finished.
+    • Also, turning on the rule did not immediately expire already-issued gate passes (we have since fixed this), so the older pass kept working through November 19.
+    • Most importantly, anyone holding the printed backup code could open the side locker without a badge check.`;
+  assert.equal(fixNoteFormatting(agy), expected);
+  assert.equal(fixNoteFormatting(expected), expected);
+  // Selections can start on the first letter, on the │ bar, or partway into a paragraph or list item.
+  assert.equal(fixNoteFormatting(agy.replace(/^  │ /, '')), expected);
+  assert.equal(fixNoteFormatting(agy.replace(/^  /, '')), expected);
+  assert.equal(fixNoteFormatting('We checked the gate and\n  │ carrier logs for the shipment.'), 'We checked the gate and carrier logs for the shipment.');
+  assert.equal(fixNoteFormatting('1. First line of item\n  │ continued on the rail.'), '1. First line of item continued on the rail.');
+  // Mixed with surrounding prose, leading/trailing bare │ lines, single-line copy, and backtick/tilde overflow.
+  assert.equal(fixNoteFormatting('Draft reply:\n\n  │\n  │ Line one wrapped to\n  `HANDOFF.md`\n  │ in\n  ~400ms\n  │\n\nSend when ready.'), 'Draft reply:\n\nLine one wrapped to `HANDOFF.md` in ~400ms\n\nSend when ready.');
+  assert.equal(fixNoteFormatting('  │ Single rail line'), 'Single rail line');
+  assert.equal(fixNoteFormatting('  │   • Single rail bullet  '), '• Single rail bullet  ');
+  // Box tables and fenced code inside a rail keep their structure after the rail is removed.
+  const boxedInRail = '  │ Summary:\n  │ ┌──┬──┐\n  │ │ A │ B │\n  │ └──┴──┘';
+  assert.equal(fixNoteFormatting(boxedInRail), 'Summary:\n┌──┬──┐\n│ A │ B │\n└──┴──┘');
+  const fencedInRail = '  │ Run this:\n  │\n  │ ```sh\n  │ npm ci\n  │   npm test\n  │ ```';
+  assert.equal(fixNoteFormatting(fencedInRail), 'Run this:\n\n```sh\nnpm ci\n  npm test\n```');
+  const treeInRail = '  │ Files:\n  │\n  │ src/\n  │ ├── a/\n  │ │   ├── b.js\n  │ │   └── c.js\n  │ └── d.js';
+  assert.equal(fixNoteFormatting(treeInRail), 'Files:\n\nsrc/\n├── a/\n│   ├── b.js\n│   └── c.js\n└── d.js');
+  // Standalone box rows, rounded panels, directory trees, lone │ and code blocks stay intact.
+  for (const kept of [
+    '│ A │ B │\n│ 1 │ 2 │',
+    '╭───╮\n│ A │\n╰───╯',
+    '│   ├── b.js\n│   └── c.js',
+    '├── a/\n│\n└── b/',
+    '    │ indented code\n    │ stays intact',
+    '```text\n  │ fenced rail\n  │ stays intact\n```',
+    '  │',
+    '│   ├── helper.js',
+  ]) assert.equal(fixNoteFormatting(kept), kept);
+});
+
+test('joins wrapped hyphenated words without breaking suspended hyphens or dashes', () => {
+  assert.equal(fixNoteFormatting('invalidate already-\nlogged-in sessions'), 'invalidate already-logged-in sessions');
+  assert.equal(fixNoteFormatting('check EIP-\n7702 and up-\nto-date notes'), 'check EIP-7702 and up-to-date notes');
+  assert.equal(fixNoteFormatting('supports pre-\nand post-checks, two-\nor three-day runs, and one-\nto two-hour windows'), 'supports pre- and post-checks, two- or three-day runs, and one- to two-hour windows');
+  assert.equal(fixNoteFormatting('keep dash -\nseparated and double--\nhyphen spacing'), 'keep dash - separated and double-- hyphen spacing');
+});
+
 test('preserves nested lists while unwrapping their continuation lines', () => {
   assert.equal(fixNoteFormatting('  - Parent item\n    continued\n    - Child item\n      continued\n  - Next item'), '- Parent item continued\n  - Child item continued\n- Next item');
   assert.equal(fixNoteFormatting('- Parent\n  - Child'), '- Parent\n  - Child');
