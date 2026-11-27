@@ -9,10 +9,169 @@ const railBar = /^ {0,3}│(?: |$)/;
 const railPrefix = /^ {0,3}│ ?/;
 const hyphenWrap = /[\p{L}\p{N}]-$/u;
 const suspendedHyphen = /^(?:and|or|nor|to)(?:\s|$)/i;
+const proseWord = /^[\p{L}\p{M}]+(?:['’-][\p{L}\p{M}]+)*$/u;
+const leadPunct = /^["'“”‘’(\[`*_~]+/;
+const trailPunct = /["'“”‘’)\],.:;!?`*_~…\-—]/;
+const cjkChar = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/gu;
+const wideChar = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\u3000-\u303F\uFF00-\uFFEF]/gu;
+const codeStart = /^(?:\/\/|\/\*|\*\/|--\s|@@\s|<\/?[a-zA-Z][\w-]*(?:[\s/>]|$)|"""|''')/;
+const diffLine = /^[-+][a-zA-Z_]/;
+const bracketOnly = /^[{}()[\]]+$/;
+const keyLine = /^(?:"[^"]+"|\.?[a-zA-Z_][\w.-]*):(?:\s|$)/;
+const kvAssign = /^[a-zA-Z_][\w.-]*\s*=\s*/;
+const declAssign = /^(?:export\s+)?(?:type|interface|const|let|var|val)\s+[A-Za-z_$][\w$]*\s*[=:{]|^from\s+[\w.]+\s+import\b/;
+const logOrSha = /^(?:\[?(?:\d{4}-\d{2}-\d{2}[T ]?\d{2}:\d{2}(?:[:.]\d+)*Z?|\d{2}:\d{2}:\d{2}(?:\.\d+)?|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}\s+\d{2}:\d{2}(?::\d{2})?|(?:TRACE|DEBUG|INFO|WARN(?:ING)?|ERROR|FATAL|CRITICAL))\]?[\s:]|[0-9a-f]{7,40}\s+)/;
+const funcCall = /\b[A-Za-z_]\w*!?\((?!(?:s|es|n)\))/;
+const shellOp = /(?:^|\s)(?:&&|\|\||>>|>&\d)(?:\s|$)/;
+const inlineAssign = /\b[A-Za-z_]\w*=[^\s]/;
+const cliFlag = /(?:^|\s)--?[a-zA-Z][\w-]*(?:=|\s|$)/;
+const upperKeyword = /^(?:SELECT|FROM|WHERE|INSERT|UPDATE|DELETE|CREATE|ALTER|DROP|GRANT|REVOKE|RUN|WORKDIR|COPY|ENV|CMD|ENTRYPOINT|EXPOSE|ARG)\b(?!:)/;
+const cmdStart = /^(?:(?:npm|pnpm|yarn|npx|git|curl|wget|docker|kubectl|sudo|apt|apt-get|brew|pip|python3?|node|echo|printf|puts|abort|def|func|fn|println!|[a-z]+_[a-z]+)\b|\.{1,2}\/)/;
+const stmtStart = /^(?:set|export|exit|return|raise|throw|import|class)\b/;
+const shortCodeLine = /^(?:exit|return|break|continue|pass|raise|throw|yield|import|abort)\b/;
+const commonProseStart = /^(?:the|we|you|it|this|that|in|on|for|if|when|also|and|but|or|so|to|a|an|our|your|they|there|here|all|each|one|two)$/i;
 const indentation = line => line.match(/^ */)[0].length;
+const hasHardBreak = line => line.endsWith('  ') || line.endsWith('\\');
 const joinWrapped = (before, after) =>
   hyphenWrap.test(before) && /^[\p{L}\p{N}]/u.test(after) && !suspendedHyphen.test(after)
     ? before + after : `${before} ${after}`;
+
+function stripEdgePunct(token) {
+  const s = token.replace(leadPunct, '');
+  let end = s.length;
+  while (end > 0 && trailPunct.test(s[end - 1])) end--;
+  return s.slice(0, end);
+}
+
+function proseStats(text) {
+  const tokens = text.trim().split(/\s+/).filter(Boolean);
+  let words = 0;
+  for (const token of tokens) {
+    if (proseWord.test(stripEdgePunct(token))) words++;
+  }
+  return { tokens: tokens.length, words, ratio: tokens.length ? words / tokens.length : 0 };
+}
+
+const displayWidth = line => line.length + (line.match(wideChar)?.length ?? 0);
+
+function isCodeLike(line, atCodeBoundary, stats) {
+  const trimmed = line.trim();
+  if (!trimmed) return false;
+  if (codeStart.test(trimmed) || trimmed.endsWith('{') || trimmed.endsWith('}') || bracketOnly.test(trimmed)) return true;
+  if (atCodeBoundary && diffLine.test(trimmed)) return true;
+  if ((trimmed.startsWith('"') && trimmed.endsWith('",')) || (trimmed.startsWith("'") && trimmed.endsWith("',"))) return true;
+  if (logOrSha.test(trimmed) || trimmed.split(/(?<![.!?]) {2,}/).length >= 3) return true;
+  if (kvAssign.test(trimmed) || declAssign.test(trimmed) || upperKeyword.test(trimmed)) return true;
+  if (atCodeBoundary && (cmdStart.test(trimmed) || stmtStart.test(trimmed))) return true;
+  const plain = trimmed.replace(/`[^`]+`|https?:\/\/\S+/g, ' ');
+  if (funcCall.test(plain) || shellOp.test(plain)) return true;
+  if ((inlineAssign.test(plain) || cliFlag.test(plain)) && stats.ratio < 0.65) return true;
+  if (trimmed.endsWith(';') && (stats.words < 5 || stats.ratio < 0.55)) return true;
+  return false;
+}
+
+// Antigravity (agy) and other terminals render fenced ```text blocks four spaces
+// in and hard-wrap long lines back to column four. Strip that four-space margin
+// only when the pasted lines show terminal-wrapped prose rather than indented code.
+function isWrappedFourSpaceProse(lines) {
+  const firstIdx = lines.findIndex(line => line.trim());
+  if (firstIdx === -1) return false;
+  const dedent = line => line.slice(Math.min(4, indentation(line)));
+  const firstWraps = firstIdx + 1 < lines.length && !!lines[firstIdx + 1].trim();
+
+  // Estimate terminal wrap width from multi-token prose-region lines, ignoring
+  // fenced code blocks, structural lines, and single-token overflow lines (e.g. URLs).
+  let fence = null, maxLen = 0;
+  for (let i = firstIdx; i < lines.length; i++) {
+    const raw = lines[i], trimmed = raw.trim();
+    if (fence) {
+      if (new RegExp(`^${fence[0]}{${fence.length},}\\s*$`).test(trimmed)) fence = null;
+      continue;
+    }
+    const opening = trimmed.match(/^(`{3,}|~{3,})/);
+    if (opening) { fence = opening[0]; continue; }
+    if (!trimmed) continue;
+    const d = dedent(raw).trimEnd(), dTrim = d.trim();
+    if (i === firstIdx && indentation(raw) < 4 && (!firstWraps || dTrim.endsWith(':'))) continue;
+    if (blockLine.test(dTrim) || boxLine.test(dTrim) || railBar.test(d) || quoteBar.test(d)) continue;
+    const cjkCount = dTrim.match(cjkChar)?.length ?? 0;
+    if (!/\s/.test(dTrim) && cjkCount < 10) continue;
+    maxLen = Math.max(maxLen, displayWidth(d));
+  }
+  if (maxLen < 42) return false;
+
+  fence = null;
+  let wrapPairs = 0, codeLines = 0, unwrappedPairs = 0, inList = false, prevWasCode = false;
+  for (let i = firstIdx; i < lines.length; i++) {
+    const raw = lines[i], trimmed = raw.trim();
+    if (fence) {
+      if (new RegExp(`^${fence[0]}{${fence.length},}\\s*$`).test(trimmed)) fence = null;
+      continue;
+    }
+    const opening = trimmed.match(/^(`{3,}|~{3,})/);
+    if (opening) { fence = opening[0]; inList = false; prevWasCode = false; continue; }
+    if (!trimmed) { inList = false; prevWasCode = false; continue; }
+
+    const indentA = indentation(raw);
+    const a = dedent(raw).trimEnd(), aTrim = a.trim();
+    const aBody = a.replace(listMarker, '');
+    const aStats = proseStats(aBody);
+    const atCodeBoundary = i === firstIdx || !lines[i - 1].trim() || prevWasCode;
+    const aCode = isCodeLike(a, atCodeBoundary, aStats);
+    prevWasCode = aCode;
+    if (indentA <= 4 && aCode) codeLines++;
+    const markerA = raw.match(listMarker);
+    if (markerA && !aCode) inList = true;
+
+    if (i + 1 >= lines.length || !lines[i + 1].trim()) continue;
+    const rawB = lines[i + 1];
+    const indentB = indentation(rawB);
+    const b = dedent(rawB).trimEnd(), bTrim = b.trim();
+    if (blockLine.test(aTrim) || boxLine.test(aTrim) || railBar.test(a) || quoteBar.test(a)
+      || blockLine.test(bTrim) || boxLine.test(bTrim) || railBar.test(b) || quoteBar.test(b)
+      || /^(`{3,}|~{3,})/.test(bTrim)) continue;
+    if (listMarker.test(b) || hasHardBreak(raw)) continue;
+    if (keyLine.test(aTrim) && keyLine.test(bTrim)) { if (indentA <= 4) codeLines++; continue; }
+
+    const firstA = aTrim.split(/\s+/)[0], firstB = bTrim.split(/\s+/)[0];
+    if (firstA === firstB && /^[A-Za-z_][\w.-]*$/.test(firstA) && !commonProseStart.test(firstA)) {
+      if (indentA <= 4) codeLines++;
+      continue;
+    }
+
+    const bStats = proseStats(b);
+    const bCode = isCodeLike(b, aCode, bStats);
+    if (aCode || bCode) continue;
+    if (i === firstIdx && indentA < 4 && aTrim.endsWith(':')) continue;
+
+    const sameWrapIndent = (indentA === 4 && indentB === 4)
+      || (i === firstIdx && indentA < 4 && indentB === 4)
+      || (markerA && (indentB === indentA || (indentB > indentA && indentB <= markerA[0].length)))
+      || (inList && indentA > 4 && indentA <= 8 && indentB === indentA);
+    if (!sameWrapIndent) continue;
+
+    const aWidth = displayWidth(a);
+    const aCjk = aTrim.match(cjkChar)?.length ?? 0;
+    const isCjk = aCjk >= 10 && aCjk / aTrim.replace(/\s+/g, '').length >= 0.3;
+    const wouldFit = aWidth + (isCjk ? 0 : 1) + (isCjk ? 2 : displayWidth(firstB));
+    const partialMidFirst = i === firstIdx && indentA === 0 && !/[:.!?]$/.test(aTrim) && aWidth >= 20 && displayWidth(b) >= 45;
+    if (!partialMidFirst && (aWidth < 36 || wouldFit < maxLen - 2 || wouldFit < 44)) {
+      if (indentA <= 4 && aWidth >= 25 && aStats.tokens >= 4 && wouldFit < maxLen - 12 && !/[:,.!?]$/.test(aTrim)) unwrappedPairs++;
+      continue;
+    }
+
+    if (isCjk) { wrapPairs++; continue; }
+    const pairTokens = aStats.tokens + bStats.tokens;
+    const pairRatio = pairTokens ? (aStats.words + bStats.words) / pairTokens : 0;
+    const bOk = !(shortCodeLine.test(bTrim) && !/[.!?]$/.test(bTrim)) && (bStats.tokens <= 2
+      ? (bStats.words >= 1 || /[.)?!]$/.test(bTrim))
+      : (bStats.words >= 1 && (bStats.ratio >= 0.3 || pairRatio >= 0.5)));
+    if (aStats.words >= 4 && aStats.ratio >= 0.35 && pairRatio >= 0.42 && bOk) {
+      wrapPairs++;
+    }
+  }
+  return wrapPairs > 0 && wrapPairs > codeLines && wrapPairs > unwrappedPairs;
+}
 
 // Strip Antigravity's left │ rail while leaving box tables, directory trees and
 // fenced or indented code alone. A wrapped word that spills past the rail onto
@@ -118,12 +277,22 @@ export function fixNoteFormatting(text) {
 
   // Terminal selections can start partway through the first line's left margin.
   const first = content[0].trimStart();
-  const marginLines = content.length > 1 && !listMarker.test(first) && !blockLine.test(first) && !/^(`{3,}|~{3,})/.test(first)
+  const firstIdx = lines.findIndex(line => line.trim());
+  const nextLine = firstIdx + 1 < lines.length ? lines[firstIdx + 1] : '';
+  const firstMarker = content[0].match(listMarker);
+  const listStartsWrappedFour = !!firstMarker && firstMarker[0].length < 4
+    && !!nextLine.trim() && !listMarker.test(nextLine) && indentation(nextLine) === 4 && !nextLine.trimEnd().endsWith(':')
+    && content.slice(1).every(line => indentation(line) >= 4);
+  const marginLines = content.length > 1 && (!firstMarker || listStartsWrappedFour)
+    && !blockLine.test(first) && !/^(`{3,}|~{3,})/.test(first)
     ? content.slice(1) : content;
   const margin = marginLines.reduce((min, line) => Math.min(min, indentation(line)), Infinity);
   // Four spaces or more may be an intentional Markdown code block. Five is the
-  // margin Hermes draws around an answer: a border column and four of padding.
-  if (margin > 0 && (margin < 4 || margin === 5)) lines = lines.map(line => line.slice(Math.min(margin, indentation(line))));
+  // margin Hermes draws around an answer; four is also how terminals like agy
+  // indent rendered ```text blocks, so strip four when it wraps prose.
+  if (margin > 0 && (margin < 4 || margin === 5 || (margin === 4 && isWrappedFourSpaceProse(lines)))) {
+    lines = lines.map(line => line.slice(Math.min(margin, indentation(line))));
+  }
   lines = stripRails(lines);
 
   const result = [];
@@ -131,19 +300,22 @@ export function fixNoteFormatting(text) {
   for (let index = 0; index < lines.length; index++) {
     const line = lines[index], trimmed = line.trim();
     const indent = indentation(line);
-    const marker = line.match(listMarker);
+    const tabCode = /^\t/.test(line);
+    const rawMarker = line.match(listMarker);
     const opening = trimmed.match(/^(`{3,}|~{3,})/);
     const table = restoreBoxTable(line);
     const block = blockLine.test(trimmed) || boxLine.test(trimmed) || !!table;
     // A list has its own terminal margin, even beside unindented paragraphs.
     // Keep that margin across blank lines so loose nested lists stay nested.
-    if (!fence && trimmed && listMargin !== null && !marker && indent < listIndent && (!join || opening || block)) {
+    if (!fence && trimmed && listMargin !== null && (!rawMarker || tabCode) && indent < listIndent && (!join || opening || block || tabCode)) {
       listMargin = null; listIndent = 0;
     }
+    const code = !fence && !!trimmed && (tabCode || indent >= listIndent + 4);
+    const marker = code ? null : rawMarker;
     if (!fence && marker) {
       // Terminal • items can each have a copy margin after an unindented lead.
       if (terminalBullet.test(line)) listMargin = indent;
-      else listMargin = listMargin === null ? (indent < 4 ? indent : 0) : Math.min(listMargin, indent);
+      else listMargin = listMargin === null ? indent : Math.min(listMargin, indent);
     }
     const formatted = listMargin === null ? line : line.slice(Math.min(listMargin, indent));
     if (fence) {
@@ -159,7 +331,6 @@ export function fixNoteFormatting(text) {
       result.push(''); join = false;
       continue;
     }
-    const code = !marker && (/^\t/.test(line) || indent >= listIndent + 4);
     if (!code && quoteBar.test(line)) {
       let end = index;
       while (end < lines.length && quoteBar.test(lines[end])) end++;
@@ -184,7 +355,7 @@ export function fixNoteFormatting(text) {
       result.push(formatted); join = false;
       continue;
     }
-    const hardBreak = / {2,}$|\\$/.test(line);
+    const hardBreak = hasHardBreak(line);
     const value = hardBreak ? line.trimStart() : trimmed;
     if (marker) {
       result.push(hardBreak ? formatted : formatted.trimEnd()); listIndent = marker[0].length;
